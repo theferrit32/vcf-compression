@@ -1,7 +1,7 @@
 default: debug
 
 debug: src/main.cpp
-	g++ -Wall -o -DDEBUG main src/main.cpp
+	g++ -Wall -DDEBUG -o main src/main.cpp
 
 release: src/main.cpp
 	g++ -Wall -O3 -o main src/main.cpp
