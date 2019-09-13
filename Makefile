@@ -1,7 +1,8 @@
-default: main
 
 main: src/main.cpp
 	g++ -Wall -DDEBUG -o $@ $^
+
+release: main_release
 
 main_release: src/main.cpp
 	g++ -Wall -O3 -o $@ $^
