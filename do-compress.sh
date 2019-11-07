@@ -1,9 +1,13 @@
 #!/bin/bash
 
 fname="test-16-100.vcf"
+comp_fname="${fname}.vcfc"
+decomp_fname="${fname}.decompressed"
 
-./main compress $fname "$fname.vcfc" 2>&1 | tee compress.log
+./main compress $fname $comp_fname 2>&1 | tee compress.log
 
-hexdump "$fname.vcfc" -C | tee "$fname.vcfc.hexdump"
+hexdump $comp_fname -C | tee "$comp_fname.hexdump"
 
-./main decompress "$fname.vcfc" "$fname.decompressed" 2>&1 | tee decompress.log
+./main decompress $comp_fname $decomp_fname 2>&1 | tee decompress.log
+
+
