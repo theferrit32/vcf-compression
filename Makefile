@@ -1,10 +1,10 @@
 
-main: src/main.cpp
+main: src/main.cpp src/utils.hpp
 	g++ -Wall -DDEBUG -o $@ $^
 
 release: main_release
 
-main_release: src/main.cpp
+main_release: src/main.cpp src/utils.hpp
 	g++ -Wall -O3 -o $@ $^
 
 huffman.so: huffman.cpp
