@@ -134,7 +134,12 @@ std::vector<byte_t> compress_data_line(const std::string& line, const VcfCompres
     const std::string& filter = terms[6];
     const std::string& info = terms[7];
 
-    // store non-sample columns raw
+    // store non-sample columns uncompressed
+    // maximum of 9 of these, so fits in a SAMPLE_MASKED_UNCOMPRESSED (max 31)
+    // uncompressed flag
+    byte_t non_sample_uncompressed_flag = SAMPLE_MASKED_UNCOMPRESSED | 8;
+    byte_vec.push_back(non_sample_uncompressed_flag); // must update this later
+
     push_string_to_byte_vector(byte_vec, ref_name);
     byte_vec.push_back('\t');
     push_string_to_byte_vector(byte_vec, position);
@@ -157,6 +162,9 @@ std::vector<byte_t> compress_data_line(const std::string& line, const VcfCompres
     // first is the FORMAT column
     // TODO parse this and use it to split up sample columns
     if (terms.size() > VCF_REQUIRED_COL_COUNT) {
+        // update uncompressed column count
+        byte_vec[0] = byte_vec[0] + 1; // no overflow check, max=31
+
         std::string format = terms[8];
         byte_vec.push_back('\t');
         push_string_to_byte_vector(byte_vec, format);
@@ -180,15 +188,19 @@ std::vector<byte_t> compress_data_line(const std::string& line, const VcfCompres
         samples[idx] = val;
         terms.pop_back();
     }
+    for (size_t i = 0; i < samples.size(); i++) {
+        std::cout << samples[i] << " ";
+    }
+    std::cout << std::endl;
 
     for (size_t i = 0; i < samples.size(); i++) {
         std::string& sample_val = samples.at(i);
-        uint8_t max_dedup_00 = 0x7F; // first bit 0 signals this is a 0|0 term (max = 127)
-        uint8_t max_dedup_01_10_11 = 0x3F; // first 2 bits reserved, 6 bits left for count (max = 63)
-        debugf("max_dedup_00: %u\n", max_dedup_00);
-        debugf("max_dedup_01_10_11: %u\n", max_dedup_01_10_11);
+        uint8_t max_dedup_00 = 0x7F; // first bit 0 means this is a 0|0 term, 7 bits left for count (max = 127)
+        uint8_t max_dedup_01_10_11 = 0x1F; // first 3 bits reserved, 5 bits left for count (max = 31)
+        debugf("sample_val: %s\n", sample_val.c_str());
         if (sample_val == "0|0") {
             size_t count = 1;
+            i++;
             for ( ;
                     count < max_dedup_00
                     && i < samples.size()
@@ -196,31 +208,44 @@ std::vector<byte_t> compress_data_line(const std::string& line, const VcfCompres
                     i++) {
                 count++;
             }
-            debugf("0|0 repeated %ld times\n", count);
+            i--;
+            debugf("0|0 occurred %ld times\n", count);
             byte_t b = 0x0 | ((uint8_t) count);
-            debugf("compressed to: %02X\n", b);
+            debugf("compressed to: %s\n", char_to_bin_string(b).c_str());
             byte_vec.push_back(b);
         } else if (sample_val == "0|1" || sample_val == "1|0" || sample_val == "1|1") {
             // not 0|0
             size_t count = 1;
+            i++;
             for ( ;
                     count < max_dedup_01_10_11
                     && i < samples.size()
                     && samples.at(i) == sample_val;
-                    i++) {
+                    i++ ) {
                 count++;
             }
-            debugf("%s repeated %ld times\n", sample_val.c_str(), count);
-            byte_t b = 0x0 | ((uint8_t) count);
-            debugf("compressed to: %02X\n", b);
+            i--;
+            debugf("%s occurred %ld times\n", sample_val.c_str(), count);
+            byte_t b;
+            if (sample_val == "0|1") {
+                b = SAMPLE_MASKED_01 | ((uint8_t) count);
+            } else if (sample_val == "1|0") {
+                b = SAMPLE_MASKED_10 | ((uint8_t) count);
+            } else if (sample_val == "1|1") {
+                b = SAMPLE_MASKED_11 | ((uint8_t) count);
+            } else {
+                throw std::runtime_error("Invalid state! Unknown sample " + sample_val);
+            }
+            debugf("compressed to: %s\n", char_to_bin_string(b).c_str());
             byte_vec.push_back(b);
         } else {
             // this sample's allele genotype was higher than ALT 1 (>= 2)
             // since this is fairly rare, by the VCF definition, don't bother compressing
             debugf("sample > 1 (%s), skipping compression\n", sample_val.c_str());
             // send a flag to note this column is *not* compressed
-            debugf("pushing SAMPLE_MASKED_UNCOMPRESSED: %02X\n", SAMPLE_MASKED_UNCOMPRESSED);
-            byte_vec.push_back(SAMPLE_MASKED_UNCOMPRESSED);
+            uint8_t uc_val = SAMPLE_MASKED_UNCOMPRESSED | 1;
+            debugf("pushing SAMPLE_MASKED_UNCOMPRESSED + count: %s\n", char_to_bin_string(uc_val).c_str());
+            byte_vec.push_back(uc_val);
             push_string_to_byte_vector(byte_vec, sample_val);
             byte_vec.push_back('\t');
         }
@@ -257,7 +282,7 @@ int compress(const std::string& input_filename, const std::string& output_filena
                 //delete local_readbuf;
                 throw VcfValidationError("VCF Header did not have enough columns");
             }
-            schema.sample_count = line_terms.size() - VCF_REQUIRED_COL_COUNT;
+            schema.sample_count = line_terms.size() - VCF_REQUIRED_COL_COUNT - 1;
             debugf("sample count: %ld\n", schema.sample_count);
             // insert header in raw format
             output_fstream << linebuf << "\n";
@@ -364,41 +389,64 @@ int decompress(const std::string& input_filename, const std::string& output_file
     size_t line_sample_count = 0;
     while (!input_fstream.eof()) {
         input_fstream.read(&rb, 1);
+        debugf("Top loop, rb: 0b%s, line_sample_count: %ld, line_tab_count: %ld\n", char_to_bin_string(rb).c_str(), line_sample_count, line_tab_count);
+
+        if (line_tab_count == 0 && rb != '\n') {
+            // interpret as first skip flag
+            uint8_t count = (rb & (~SAMPLE_MASK_UNCOMPRESSED)) & 0xFF;
+            debugf("Skipping first %u columns\n", count);
+            while (line_tab_count < count) {
+                input_fstream.read(&rb, 1);
+                output_fstream.write(&rb, 1);
+                printf("%c (%02X)", rb, rb);
+                if (rb == '\t') {
+                    line_tab_count++;
+                }
+            }
+            printf("\n");
+            continue;
+        }
+
         // check if we're within the uncompressed required columns
-        if (line_sample_count == schema.sample_count && rb == '\n') {
+        else if (line_sample_count >= schema.sample_count && rb == '\n') {
             debugf("Reached end of line\n");
             // handle end of line
             // TODO check col count
             line_tab_count = 0;
+            line_sample_count = 0;
             output_fstream.write("\n", 1);
+        } else if (line_sample_count >= schema.sample_count && rb != '\n') {
+            throw VcfValidationError("Reached expected sample count in line, but did not encounter newline character");
         }
-        else if (line_tab_count < VCF_REQUIRED_COL_COUNT /*|| (line_tab_count == VCF_REQUIRED_COL_COUNT && rb != '\n')*/) {
-            // we're before the end of the line, still within uncompressed variant description columns
-            debugf("Writing VCF required data\n");
-            output_fstream.write(&rb, 1);
-            while (true) {
-                input_fstream.read(&rb, 1);
-                if (rb == '\t') {
-                    debugf("Finished required VCF column\n");
-                    output_fstream.write(&rb, 1);
-                    line_tab_count++;
-                    break;
-                }
-                output_fstream.write(&rb, 1);
-            }
-        }
+
+        // else if (line_tab_count < VCF_REQUIRED_COL_COUNT + 1 /*|| (line_tab_count == VCF_REQUIRED_COL_COUNT && rb != '\n')*/) {
+        //     // we're before the end of the line, still within uncompressed variant description columns
+        //     debugf("Writing VCF required data\n");
+        //     output_fstream.write(&rb, 1);
+        //     while (true) {
+        //         input_fstream.read(&rb, 1);
+        //         if (rb == '\t') {
+        //             debugf("Finished required VCF column\n");
+        //             output_fstream.write(&rb, 1);
+        //             line_tab_count++;
+        //             break;
+        //         }
+        //         output_fstream.write(&rb, 1);
+        //     }
+        // }
         else if ((rb & SAMPLE_MASK_00) == SAMPLE_MASKED_00) {
             // is a 0|0 column
-            uint8_t count = rb & (SAMPLE_MASK_00 ^ 0xFF); // and with inverse of flag mask
+            uint8_t count = (rb & (~SAMPLE_MASK_00)) & 0xFF; // and with inverse of flag mask
             debugf("0|0 repeat count: %u\n", count);
 
             while (count--) {
                 output_fstream.write(GT_00.c_str(), GT_00.size());
-                output_fstream.write(tab, tab_len);
                 line_tab_count++;
                 line_sample_count++;
+                if (line_sample_count < schema.sample_count) {
+                    output_fstream.write(tab, tab_len);
+                }
             }
-
         } else if ((rb & SAMPLE_MASK_UNCOMPRESSED) == SAMPLE_MASKED_UNCOMPRESSED) {
             uint8_t uncompressed_count = rb & (~SAMPLE_MASK_UNCOMPRESSED);
             debugf("%u uncompressed columns follow\n", uncompressed_count);
@@ -416,31 +464,32 @@ int decompress(const std::string& input_filename, const std::string& output_file
         } else {
             // either 0|1, 1|0, or 1|1
             byte_t masked = rb & SAMPLE_MASK_01_10_11;
+            const std::string *sample_str = NULL;
+
             if (masked == SAMPLE_MASKED_01) {
-                debugf("Got 0|1\n");
-                output_fstream.write(GT_01.c_str(), GT_01.size());
-                line_tab_count++;
-                line_sample_count++;
+                sample_str = &GT_01;
             } else if (masked == SAMPLE_MASKED_10) {
-                debugf("Got 1|0\n");
-                output_fstream.write(GT_10.c_str(), GT_10.size());
-                line_tab_count++;
-                line_sample_count++;
+                sample_str = &GT_10;
             } else if (masked == SAMPLE_MASKED_11) {
-                debugf("Got 1|1\n");
-                output_fstream.write(GT_11.c_str(), GT_11.size());
-                line_tab_count++;
-                line_sample_count++;
+                sample_str = &GT_11;
             } else {
                 throw std::runtime_error("Error during decompression of compressed file, unrecognized bitmask");
             }
-            if (input_fstream.peek() != '\n') {
-                output_fstream.write(tab, tab_len);
+
+            // write the sample GT and increment counters
+            uint8_t count = (rb & (~SAMPLE_MASK_01_10_11)) & 0xFF;
+            debugf("Got %s, count: %u\n", sample_str->c_str(), count);
+            while (count--) {
+                output_fstream.write(sample_str->c_str(), sample_str->size());
+                line_sample_count++;
+                if (line_sample_count < schema.sample_count /*input_fstream.peek() != '\n'*/) {
+                    output_fstream.write(tab, tab_len);
+                }
+                line_tab_count++;
             }
+
         }
-
     }
-
 
     return -1;
 }
