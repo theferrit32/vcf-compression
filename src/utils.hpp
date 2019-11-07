@@ -9,10 +9,10 @@ typedef uint8_t byte_t;
 //#define DEBUG
 #ifdef DEBUG
     #define debug(s) fputs(s.c_str(), stderr)
-    #define debugf(s, ...) fprintf(stderr, s, __VA_ARGS__)
+    #define debugf(...) fprintf(stderr, __VA_ARGS__)
 #else
     #define debug(s) {}
-    #define debugf(s, ...) {}
+    #define debugf(...) {}
 #endif
 
 // std::vector<std::string> split_string_regex(const std::string& s, const std::string& regex_str) {
@@ -29,6 +29,20 @@ typedef uint8_t byte_t;
 //     return v;
 // }
 
+std::string char_to_bin_string(const char c) {
+    std::string output;
+    for (size_t i = 0; i < 8; i++) {
+        char mask = 0x1 << (7-i);
+        char bit = (c & mask);
+        if (bit) {
+            output += "1";
+        } else {
+            output += "0";
+        }
+    }
+    return output;
+}
+
 std::vector<std::string> split_string(const std::string& s, const std::string& delim) {
     std::vector<std::string> v;
     size_t idx = 0;
@@ -41,7 +55,6 @@ std::vector<std::string> split_string(const std::string& s, const std::string& d
         if (term.size() > 0) {
             v.push_back(term);
         }
-
         // set next search index to be after the current delimiter
         search_idx = idx + delim.size();
     }
