@@ -1,0 +1,11 @@
+# build files
+main
+main_release
+
+# text files
+decompress.log
+compress.log
+*.decompressed
+*.hexdump
+*.vcf
+*.vcfc
