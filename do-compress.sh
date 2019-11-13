@@ -1,6 +1,10 @@
 #!/bin/bash
+if [[ -z "$1" ]]; then
+    echo "Must provide vcf filename"
+    return 1
+fi
 
-fname="test-16-100.vcf"
+fname="$1"
 comp_fname="${fname}.vcfc"
 decomp_fname="${fname}.decompressed"
 
