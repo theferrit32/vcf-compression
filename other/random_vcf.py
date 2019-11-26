@@ -1,8 +1,8 @@
 #!/bin/env python3
 import random, math
 
-sample_count = 16
-variant_count = 100
+sample_count = 10
+variant_count = 50
 alt_count = 2 # valid values: 1, 2, 3
 alt_indexes = range(0, alt_count+1)
 random.seed(5)
@@ -35,6 +35,8 @@ def fwrite(f, s):
 with open(output_filename, 'wb') as f:
     # write headers
     fwrite(f, '##fileformat=VCFv4.1\n')
+    fwrite(f, '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
+    fwrite(f, '##fileDate=20150218\n')
     fwrite(f, '#' + '\t'.join(tsv_header))
     digits = int(math.ceil(math.log10(sample_count)))
     sample_name_fmt = 'HG%0' + str(digits) + 'd'
