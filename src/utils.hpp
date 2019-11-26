@@ -3,6 +3,8 @@
 #include <vector>
 #include <string>
 #include <sstream>
+#include <stdarg.h>
+#include <string.h>
 
 typedef uint8_t byte_t;
 
@@ -29,43 +31,84 @@ typedef uint8_t byte_t;
 //     return v;
 // }
 
-std::string char_to_bin_string(const char c) {
+
+
+std::string char_to_bin_string(const char c_input) {
     std::string output;
+    const uint8_t c = reinterpret_cast<const uint8_t&>(c_input);
     for (size_t i = 0; i < 8; i++) {
-        char mask = 0x1 << (7-i);
-        char bit = (c & mask);
+        uint8_t mask = 0x1 << (7-i);
+        //debugf("mask = %02X\n", mask);
+        uint8_t bit = (c & mask);
         if (bit) {
             output += "1";
         } else {
             output += "0";
         }
     }
+    //debugf("%s input %02X output %s\n", __FUNCTION__, c, output.c_str());
     return output;
 }
 
-std::vector<std::string> split_string(const std::string& s, const std::string& delim) {
+std::string string_to_bin_string(const std::string& str) {
+    std::string output;
+    for (size_t i = 0; i < str.size(); i++) {
+        output += char_to_bin_string(str[i]);
+    }
+    return output;
+}
+
+
+std::vector<std::string> split_string(const std::string& s, const std::string& delim, int max_split) {
     std::vector<std::string> v;
     size_t idx = 0;
     size_t search_idx = 0;
+    int split_count = 0;
     // loop through the delimiter instances
     while ((idx = s.find(delim, search_idx)) != std::string::npos) {
+        if (max_split > 0 && (split_count >= max_split)) {
+            break;
+        }
         //debugf("idx: %ld, prev_idx: %ld\n", idx, search_idx);
         std::string term = s.substr(search_idx, (idx - search_idx));
         //debugf("Found term: %s\n", term.c_str());
         if (term.size() > 0) {
             v.push_back(term);
+            split_count++;
         }
         // set next search index to be after the current delimiter
         search_idx = idx + delim.size();
     }
     if (search_idx < s.size()) {
-        // leftover term after last delimiter
-        std::string term = s.substr(search_idx, (s.size() - search_idx));
-        //debugf("Adding trailing split term: %s\n", term.c_str());
-        v.push_back(term);
+        if (max_split < 0 || (split_count < max_split)) {
+            // leftover term after last delimiter
+            std::string term = s.substr(search_idx, (s.size() - search_idx));
+            //debugf("Adding trailing split term: %s\n", term.c_str());
+            v.push_back(term);
+        }
     }
     //debugf("search_idx: %ld, s.size: %ld\n", search_idx, s.size());
     return v;
+}
+
+std::vector<std::string> split_string(const std::string& s, const std::string& delim) {
+    return split_string(s, delim, -1);
+}
+
+std::string string_format(const char* format, ...) {
+    char *buf = NULL;
+    va_list va;
+    va_start(va, format);
+
+    int buflen = vsnprintf(buf, 0, format, va);
+    buf = (char*) calloc(buflen, sizeof(char));
+
+    va_start(va, format);
+    vsnprintf(buf, buflen, format, va);
+
+    std::string buf_string(buf);
+    free(buf);
+    return buf_string;
 }
 
 std::string vector_join(std::vector<std::string>& v, std::string delim) {
@@ -88,6 +131,19 @@ void push_string_to_byte_vector(std::vector<byte_t>& v, const std::string& s) {
     }
 }
 
-
+uint64_t str_to_uint64(const std::string& s, bool& success) {
+    char *buf = (char*) calloc(s.size() + 1, sizeof(char));
+    memcpy(buf, s.c_str(), s.size());
+    char *endptr = NULL;
+    long val = std::strtol(buf, &endptr, 10);
+    if (endptr != (buf + s.size())) {
+        free(buf);
+        success = false;
+        return 0;
+    }
+    free(buf);
+    success = true;
+    return val;
+}
 
 #endif

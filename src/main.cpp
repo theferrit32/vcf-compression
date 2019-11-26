@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <deque>
 #include <regex>
 #include <stdexcept>
 #include <cstdio>
@@ -41,6 +42,60 @@ int usage() {
 #define SAMPLE_MASKED_UNCOMPRESSED  0b11100000
 // the value of the remaining 5 bits in the 0b111 case are unused
 ////////////////////////////////////////////////////////////////
+
+class VcfCoordinateQuery {
+public:
+    VcfCoordinateQuery(
+            const std::string& reference_name,
+            int64_t start_position,
+            int64_t end_position) {
+        this->reference_name = reference_name;
+        this->start_position = start_position;
+        this->end_position = end_position;
+    }
+
+    VcfCoordinateQuery() {
+        this->reference_name = "";
+        this->start_position = -1;
+        this->end_position = -1;
+    }
+
+    bool matches(const std::string& reference_name, int64_t position) {
+        if (this->reference_name.size() > 0 && this->reference_name != reference_name) {
+            return false;
+        }
+        if (this->start_position >= 0 && this->start_position > position) {
+            return false;
+        }
+        if (this->end_position >= 0 && this->end_position < position) {
+            return false;
+        }
+        return true;
+    }
+
+    bool has_criteria() {
+        return this->reference_name.size() > 0
+            || this->start_position >= 0
+            || this->end_position >= 0;
+    }
+
+    const std::string& get_reference_name() {
+        return this->reference_name;
+    }
+
+    int64_t get_start_position() {
+        return this->start_position;
+    }
+
+    int64_t get_end_position() {
+        return this->end_position;
+    }
+
+private:
+    std::string reference_name;
+    int64_t start_position;
+    int64_t end_position;
+};
 
 class VcfLineStateMachine {
 public:
@@ -117,10 +172,107 @@ byte_array byte_vector_to_bytearray(const std::vector<byte_t>& v) {
     return ba;
 }
 
-int compress_data_line(const std::string& line, const VcfCompressionSchema& schema, std::vector<byte_t>& byte_vec) {
-    //byte_array ret;
-    //std::vector<byte_t> byte_vec;
-    //byte_vec.reserve(512);
+#define LINE_LENGTH_HEADER_MAX_EXTENSION 3
+class LineLengthHeader {
+public:
+    LineLengthHeader() {}
+
+    void set_extension_count(uint8_t count) {
+        if (count > LINE_LENGTH_HEADER_MAX_EXTENSION) {
+            throw std::runtime_error(string_format(
+                "Count exceeded max allowed %d: %d",
+                LINE_LENGTH_HEADER_MAX_EXTENSION, count));
+        }
+        if (count != 3) {
+            throw std::runtime_error(string_format(
+                "Extension count %d not implemented, must be 3",
+                count));
+        }
+        this->extension_count = count;
+    }
+
+    void set_length(uint32_t length) {
+        #define LINE_LENGTH_HEADER_MAX_VALUE (uint32_t)0x3FFFFFFF
+        if (length > LINE_LENGTH_HEADER_MAX_VALUE) {
+            throw std::runtime_error(string_format(
+                "Length exceeded max allowed %d: %d",
+                LINE_LENGTH_HEADER_MAX_VALUE));
+        }
+        this->length_bytes[0] = (length >> 24) & 0xFF;
+        this->length_bytes[1] = (length >> 16) & 0xFF;
+        this->length_bytes[2] = (length >> 8) & 0xFF;
+        this->length_bytes[3] = (length >> 0) & 0xFF;
+        this->length = length;
+        debugf("%s %u extension_count = %u, length = %u, bytes %02X %02X %02X %02X, bin = %s\n",
+            __FUNCTION__, length,
+            this->extension_count, this->length,
+            this->length_bytes[0],
+            this->length_bytes[1],
+            this->length_bytes[2],
+            this->length_bytes[3],
+            string_to_bin_string(std::to_string(this->length)).c_str()
+        );
+    }
+
+    void serialize(uint8_t out[4]) {
+        out[0] = this->extension_count | this->length_bytes[0];
+        out[1] = this->length_bytes[1];
+        out[2] = this->length_bytes[2];
+        out[3] = this->length_bytes[3];
+        debugf("%s %02X %02X %02X %02X extension_count = %u, length = %u, bytes %02X %02X %02X %02X, bin = %s\n",
+            __FUNCTION__, out[0], out[1], out[2], out[3],
+            this->extension_count, this->length,
+            this->length_bytes[0],
+            this->length_bytes[1],
+            this->length_bytes[2],
+            this->length_bytes[3],
+            string_to_bin_string(std::to_string(this->length)).c_str()
+        );
+    }
+
+    void deserialize(uint8_t in[4]) {
+        debugf("%s input bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n", __FUNCTION__, in[0], in[1], in[2], in[3]);
+        this->extension_count = (in[0] >> 6) & 0x03;
+        if (this->extension_count != 3) {
+            throw std::runtime_error(string_format(
+                "Extension count %d not implemented, must be 3",
+                this->extension_count));
+        }
+        this->length_bytes[0] = in[0] & 0x3F; // 00111111
+        this->length_bytes[1] = in[1];
+        this->length_bytes[2] = in[2];
+        this->length_bytes[3] = in[3];
+        this->length = (this->length_bytes[0] << 24) & (0xFF << 24);
+        debugf("length = 0x%08X ", length);
+        this->length |= (this->length_bytes[1] << 16) & (0xFF << 16);
+        debugf("length = 0x%08X ", length);
+        this->length |= (this->length_bytes[2] << 8) & (0xFF << 8);
+        debugf("length = 0x%08X ", length);
+        this->length |= (this->length_bytes[3] << 0) & (0xFF << 0);
+        debugf("length = 0x%08X ", length);
+        debugf("\n");
+
+        // this->
+        //     ((this->length_bytes[1] << 16) & (0xFF << 16)) |
+        //     ((this->length_bytes[2] << 8) & (0xFF << 8)) |
+        //     ((this->length_bytes[3] << 24) & (0xFF));
+        debugf("%s %02X %02X %02X %02X extension_count = %u, length = %u, bytes %02X %02X %02X %02X, bin = %s\n",
+            __FUNCTION__, in[0], in[1], in[2], in[3],
+            this->extension_count, this->length,
+            this->length_bytes[0],
+            this->length_bytes[1],
+            this->length_bytes[2],
+            this->length_bytes[3],
+            string_to_bin_string(std::to_string(this->length)).c_str()
+        );
+    }
+
+    uint8_t extension_count;
+    uint32_t length;
+    uint8_t length_bytes[LINE_LENGTH_HEADER_MAX_EXTENSION+1];
+};
+
+int compress_data_line(const std::string& line, const VcfCompressionSchema& schema, std::vector<byte_t>& byte_vec, bool add_newline) {
     std::vector<std::string> terms = split_string(line, "\t");
     const size_t terms_size = terms.size();
     if (terms_size < VCF_REQUIRED_COL_COUNT) {
@@ -136,11 +288,34 @@ int compress_data_line(const std::string& line, const VcfCompressionSchema& sche
     const std::string& filter = terms[6];
     const std::string& info = terms[7];
 
+
     // store non-sample columns uncompressed
     // maximum of 9 of these, so fits in a SAMPLE_MASKED_UNCOMPRESSED (max 31)
     // uncompressed flag
-    byte_t non_sample_uncompressed_flag = SAMPLE_MASKED_UNCOMPRESSED | 8;
-    byte_vec.push_back(non_sample_uncompressed_flag); // must update this later
+    // byte_t non_sample_uncompressed_flag = SAMPLE_MASKED_UNCOMPRESSED | 8;
+    // byte_vec.push_back(non_sample_uncompressed_flag); // must update this later
+
+    // TODO estimate the length required for this line so that we can shrink the bytes
+    // required for storing length while making it less likely
+    // to need to change the number of bytes later, avoiding a vector shift
+    LineLengthHeader line_length_header;
+    line_length_header.set_extension_count(3);
+    uint8_t length_header_bytes[4] = {0xC0, 0, 0, 0};
+    line_length_header.deserialize(length_header_bytes);
+    byte_vec.push_back(length_header_bytes[0]);
+    byte_vec.push_back(length_header_bytes[1]);
+    byte_vec.push_back(length_header_bytes[2]);
+    byte_vec.push_back(length_header_bytes[3]);
+
+    // include another header for the length of the uncompressed region before the sample columns
+    LineLengthHeader required_col_length_header;
+    required_col_length_header.set_extension_count(3); // restrict to 3, max = (2 ^ (30) - 1)
+    uint8_t required_col_length_header_bytes[4] = {0xC0, 0, 0, 0};
+    line_length_header.deserialize(required_col_length_header_bytes);
+    byte_vec.push_back(required_col_length_header_bytes[0]);
+    byte_vec.push_back(required_col_length_header_bytes[1]);
+    byte_vec.push_back(required_col_length_header_bytes[2]);
+    byte_vec.push_back(required_col_length_header_bytes[3]);
 
     push_string_to_byte_vector(byte_vec, ref_name);
     byte_vec.push_back('\t');
@@ -158,7 +333,10 @@ int compress_data_line(const std::string& line, const VcfCompressionSchema& sche
     byte_vec.push_back('\t');
     push_string_to_byte_vector(byte_vec, info);
 
-    debugf("quality: %s, filter: %s\n", quality.c_str(), filter.c_str());
+    //debugf("quality: %s, filter: %s\n", quality.c_str(), filter.c_str());
+
+    uint64_t required_length = 7 + ref_name.size() + position.size() + id.size() +
+        ref_bases.size() + alt_bases.size() + quality.size() + filter.size() + info.size();
 
     // handle sample columns
     // first is the FORMAT column
@@ -172,14 +350,26 @@ int compress_data_line(const std::string& line, const VcfCompressionSchema& sche
         push_string_to_byte_vector(byte_vec, format);
         debugf("pushing format: %s\n", format.c_str());
         //byte_vec.push_back('\t');
+        required_length += format.size() + 1;
     }
-    std::vector<std::string> samples; // copy of sample data
 
     const size_t vcf_sample_start_colum = VCF_REQUIRED_COL_COUNT + 1;
     size_t samples_num = terms_size - (vcf_sample_start_colum);
     if (samples_num > 0) {
         byte_vec.push_back('\t');
+        required_length += 1;
     }
+
+    debugf("Updating required length to %lu\n", required_length);
+    uint32_t required_length32 = (uint32_t) required_length;
+    byte_vec[4] = ((required_length32 >> 24) & 0xFF) | 0xC0;
+    byte_vec[5] = (required_length32 >> 16) & 0xFF;
+    byte_vec[6] = (required_length32 >> 8) & 0xFF;
+    byte_vec[7] = (required_length32 >> 0) & 0xFF;
+    debugf("Required length header bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n", byte_vec[4], byte_vec[5], byte_vec[6], byte_vec[7]);
+
+    std::vector<std::string> samples; // copy of sample data
+
     debugf("terms: %ld, samples: %ld\n", terms_size, samples_num);
     //debugf("samples in row: %ld\n", samples_num);
     samples.resize(samples_num);
@@ -254,9 +444,25 @@ int compress_data_line(const std::string& line, const VcfCompressionSchema& sche
             debugf("pushing SAMPLE_MASKED_UNCOMPRESSED + count: %s\n", char_to_bin_string(uc_val).c_str());
             byte_vec.push_back(uc_val);
             push_string_to_byte_vector(byte_vec, sample_val);
-            byte_vec.push_back('\t');
+            if (i < samples.size() - 1) { // not the last sample
+                byte_vec.push_back('\t');
+            }
         }
     }
+
+    if (add_newline) {
+        byte_vec.push_back('\n');
+    }
+
+    // Update the start-of-line line-length header
+    // include the required column length header by only subtracting 4 instead of 8
+    uint32_t line_length = byte_vec.size() - 4;
+    debugf("Updating line length to %u\n", line_length);
+    byte_vec[0] = ((line_length >> 24) & 0xFF) | 0xC0;
+    byte_vec[1] = (line_length >> 16) & 0xFF;
+    byte_vec[2] = (line_length >> 8) & 0xFF;
+    byte_vec[3] = (line_length >> 0) & 0xFF;
+    debugf("Line length header bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n", byte_vec[0], byte_vec[1], byte_vec[2], byte_vec[3]);
 
     return 0;
 }
@@ -300,11 +506,11 @@ int compress(const std::string& input_filename, const std::string& output_filena
             variant_count++;
             //lineStateMachine.to_variant();
             compressed_line.clear();
-            /*int status = */compress_data_line(linebuf, schema, compressed_line);
+            /*int status = */compress_data_line(linebuf, schema, compressed_line, true);
             for (std::vector<byte_t>::iterator iter = compressed_line.begin(); iter != compressed_line.end(); iter++) {
                 output_fstream.write((const char*)(&(*iter)), 1);
             }
-            output_fstream.write("\n", 1);
+            //output_fstream.write("\n", 1);
         }
     }
     debugf("variant count: %ld\n", variant_count);
@@ -318,7 +524,7 @@ const std::string GT_00("0|0");
 const std::string GT_01("0|1");
 const std::string GT_10("1|0");
 const std::string GT_11("1|1");
-const char eof = std::char_traits<char>::eof();
+const int eof = std::char_traits<char>::eof();
 
 /**
  * Reads from input_fstream to decompress one line from the vcfc file.
@@ -331,16 +537,46 @@ int decompress2_data_line(
         const VcfCompressionSchema& schema,
         std::string& linebuf,
         size_t *compressed_line_length) {
+    debugf("%s decompressing line, expecting %lu samples\n", __FUNCTION__, schema.sample_count);
     // decompress a single variant line
     int ib;
-    char b;
+    unsigned char b;
 
     // keep track of how many columns we've seen
     size_t line_byte_count = 0;
     size_t line_tab_count = 0;
     size_t line_sample_count = 0;
 
-    // interpret first byte as a skip flag
+    // interpret first 1 byte as a skip flag, then up to 3 additional bytes
+    ib = input_fstream.get();
+    debugf("ib = 0x%08X\n", ib);
+    if (ib == eof) {
+        debugf("%s, no data in input_fstream\n", __FUNCTION__);
+        return -1;
+    }
+    line_byte_count++;
+    b = 0xFF & ib;
+
+    // read the line length header
+    uint8_t line_length_bytes[4] = {b, 0, 0, 0};
+    LineLengthHeader line_length_header;
+    line_length_header.deserialize(line_length_bytes);
+    uint8_t extension_count = line_length_header.extension_count;
+    debugf("Line length extension count: %u\n", extension_count);
+    for (uint8_t i = 0; i < extension_count; i++) {
+        int ib = input_fstream.get();
+        if (ib == eof) {
+            debugf("%s, no data in input_fstream\n", __FUNCTION__);
+            return -1;
+        }
+        line_byte_count++;
+        line_length_bytes[i+1] = 0xFF & ib;
+    }
+    line_length_header.deserialize(line_length_bytes);
+    //uint32_t expected_line_length = line_length_header.length;
+
+
+    // read the required column skip length
     ib = input_fstream.get();
     if (ib == eof) {
         debugf("%s, no data in input_fstream\n", __FUNCTION__);
@@ -348,32 +584,46 @@ int decompress2_data_line(
     }
     line_byte_count++;
     b = 0xFF & ib;
-    #ifdef DEBUG
-    std::string msg;
-    msg = "first byte: " + char_to_bin_string(b) + ", hex: %02x\n";
-    debugf(msg.c_str(), b);
-    #endif
-    uint8_t count = (b & (~SAMPLE_MASK_UNCOMPRESSED));// & 0xFF;
-    debugf("Skipping first %u columns\n", count);
-    while (line_tab_count < count) {
-        // TODO check to make sure it is not newline or eof
-        input_fstream.read(&b, 1);
+    uint8_t required_length_bytes[4] = {b, 0, 0, 0};
+    LineLengthHeader required_length_header;
+    required_length_header.deserialize(required_length_bytes);
+    uint8_t required_extension_count = required_length_header.extension_count;
+    for (uint8_t i = 0; i < required_extension_count; i++) {
+        int ib = input_fstream.get();
+        if (ib == eof) {
+            debugf("%s, no data in input_fstream\n", __FUNCTION__);
+            return -1;
+        }
         line_byte_count++;
-        //output_fstream.write(&b, 1);
-        linebuf.push_back(b);
-        //debugf("%c (%02X)", b, b);
-        if (b == '\t') {
+        required_length_bytes[i+1] = 0xFF & ib;
+    }
+    debugf("Deserializing required length header\n");
+    required_length_header.deserialize(required_length_bytes);
+    uint32_t required_length = required_length_header.length;
+    debugf("Skipping %u bytes for required columns section\n", required_length);
+
+    for (size_t i = 0; i < required_length; i++) {
+        input_fstream.read((char*)&b, 1);
+        char cb = reinterpret_cast<char&>(b);
+        linebuf.push_back(cb);
+        if (cb == '\t') {
             line_tab_count++;
         }
     }
-    //debugf("\n");
+    debugf("Finished reading required columns: %s\n", linebuf.c_str());
+    line_byte_count += required_length;
+
 
     // check to ensure we read in the appropriate number of uncompressed columns
     // here it expects VCF_REQUIRED_COL_COUNT + 1 because it skips the format column as well
     if (line_tab_count != VCF_REQUIRED_COL_COUNT + 1) {
-        debugf("line_tab_count: %lu\n", line_tab_count);
-        throw VcfValidationError("Did not read all uncompressed columns");
-        return 0;
+        if (line_tab_count == VCF_REQUIRED_COL_COUNT && schema.sample_count == 0) {
+            // do nothing
+        } else {
+            debugf("line_tab_count: %lu\n", line_tab_count);
+            throw VcfValidationError("Did not read all uncompressed columns");
+            return 0;
+        }
     }
 
     //debugf("linebuf: %s\n", linebuf.c_str());
@@ -402,11 +652,6 @@ int decompress2_data_line(
 
             while (counter--) {
                 linebuf.append(GT_00.c_str());
-                // line_tab_count++;
-                // line_sample_count++;
-                // if (line_sample_count < schema.sample_count) {
-                //     linebuf.append(tab);
-                // }
                 linebuf.append(tab);
             }
 
@@ -417,6 +662,7 @@ int decompress2_data_line(
             // remove last tab if at end of line
             if (line_sample_count >= schema.sample_count) {
                 linebuf.pop_back();
+                line_tab_count--;
             }
         } else if ((b & SAMPLE_MASK_UNCOMPRESSED) == SAMPLE_MASKED_UNCOMPRESSED) {
             uint8_t uncompressed_count = b & (~SAMPLE_MASK_UNCOMPRESSED);
@@ -424,9 +670,9 @@ int decompress2_data_line(
             // uncompressed columns follow
             uint8_t ucounter = 0; // number of uncompressed columns
             while (ucounter < uncompressed_count) {
-                input_fstream.read(&b, 1);
+                input_fstream.read((char*)(&b), 1);
                 line_byte_count++;
-                // TODO handle newline
+                // TODO handle newline ?
                 if (b == '\n') {
 
                 }
@@ -479,7 +725,6 @@ int decompress2_data_line(
     line_byte_count++;
     if (ib == '\n') {
         b = (char)ib;
-        //output_fstream.write(&b, 1);
         linebuf.push_back(b);
     } else {
         throw VcfValidationError("Sample line did not end in a newline\n");
@@ -611,7 +856,7 @@ int decompress2(const std::string& input_filename, const std::string& output_fil
     variant_line.reserve(16 * 1024); // 16 KiB
 
     while (true) {
-        if (input_fstream.eof()) {
+        if (input_fstream.eof() || input_fstream.peek() == eof) {
             // done
             debugf("Finished decompressing lines");
             break;
@@ -635,6 +880,139 @@ int decompress2(const std::string& input_filename, const std::string& output_fil
     return 0;
 }
 
+void query_compressed_file(const std::string& input_filename, VcfCoordinateQuery query) {
+    debugf("Querying %s for %s:%lu-%lu\n", input_filename.c_str(),
+        query.get_reference_name().c_str(),
+        query.get_start_position(),
+        query.get_end_position());
+    std::ifstream input_fstream(input_filename);
+    VcfCompressionSchema schema;
+    debugf("Parsing metadata lines and header line\n");
+
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    decompress2_metadata_headers(input_fstream, meta_header_lines, schema);
+
+    size_t matched_line_count = 0;
+    std::string variant_line;
+    variant_line.reserve(1024 * 1024); // 1MiB
+
+    while (true) {
+        if (input_fstream.eof() || input_fstream.peek() == eof) {
+            // done
+            debugf("Finished querying file");
+            break;
+        }
+
+        debugf("Start of line, stream positioned so next byte is: 0x%02X, at position %lld (0x%08llx)\n",
+                (char) input_fstream.peek(),
+                (long long)input_fstream.tellg(),
+                (long long)input_fstream.tellg());
+
+        // right now all length headers are 4 bytes
+        // TODO update to interpret variable-length length headers
+        uint8_t line_length_header_bytes[4] = {0,0,0,0};
+        input_fstream.read(reinterpret_cast<char*>(line_length_header_bytes), 4);
+        debugf("line_length_header_bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
+                line_length_header_bytes[0],
+                line_length_header_bytes[1],
+                line_length_header_bytes[2],
+                line_length_header_bytes[3]);
+
+        uint8_t required_columns_length_header_bytes[4] = {0,0,0,0};
+        input_fstream.read(reinterpret_cast<char*>(required_columns_length_header_bytes), 4);
+        debugf("required_columns_length_header_bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
+                required_columns_length_header_bytes[0],
+                required_columns_length_header_bytes[1],
+                required_columns_length_header_bytes[2],
+                required_columns_length_header_bytes[3]);
+
+        int64_t read_bytes = 4 + 4; // length headers
+
+        debugf("After length headers, stream positioned so next byte is: 0x%02X, at position %lld (0x%08llx)\n",
+                (char) input_fstream.peek(),
+                (long long)input_fstream.tellg(),
+                (long long)input_fstream.tellg());
+
+        std::string ref;
+        char c;
+        while (true) {
+            if (input_fstream.eof()) {
+                throw VcfValidationError("Failed to read line, unexpected EOF while looking for reference name!");
+            }
+
+            input_fstream.read(&c, 1);
+            read_bytes++;
+            if (c == '\t') {
+                break;
+            }
+            ref.push_back(c);
+        }
+
+        std::string pos_str;
+        while (true) {
+            if (input_fstream.eof() || input_fstream.peek() == eof) {
+                throw VcfValidationError("Failed to read line, unexpected EOF while looking for position!");
+            }
+            input_fstream.read(&c, 1);
+            read_bytes++;
+            if (c == '\t') {
+                break;
+            }
+            pos_str.push_back(c);
+        }
+        bool conversion_success = false;
+        uint64_t pos = str_to_uint64(pos_str, conversion_success);
+        if (!conversion_success) {
+            throw VcfValidationError(string_format("Malformed line, pos column must be int but got: %s", pos_str.c_str()).c_str());
+        }
+        debugf("read reference_name = %s, pos = %s from compressed line\n", ref.c_str(), pos_str.c_str());
+        bool matches = query.matches(ref, pos);
+
+        if (matches) {
+            // TODO seekg backwards by appropriate number of bytes
+            int64_t seek_bytes = -1 * read_bytes;
+            debugf("Line matches, so seeking %ld bytes\n", seek_bytes);
+            input_fstream.seekg(seek_bytes, input_fstream.cur);
+
+            debugf("Now positioned so next byte is: 0x%02X, at position %lld (0x%08llx)\n",
+                    (char) input_fstream.peek(),
+                    (long long)input_fstream.tellg(),
+                    (long long)input_fstream.tellg());
+            variant_line.clear();
+            size_t compressed_line_length = 0;
+
+            int status = decompress2_data_line(input_fstream, schema, variant_line, &compressed_line_length);
+            if (status < 0 && !input_fstream.eof()) {
+                throw VcfValidationError("Failed to decompress file");
+            } else if (status < 0) {
+                break;
+            }
+
+            matched_line_count++;
+            std::cout << variant_line; // newline is included in decompress2_data_line
+
+        } else {
+            debugf("Line reference_name = %s, pos = %lu did not match\n", ref.c_str(), pos);
+            // TODO interpret line_length_bytes to skip to next line
+            LineLengthHeader line_length_header;
+            line_length_header.set_extension_count(3); // TODO interpret
+            line_length_header.deserialize(line_length_header_bytes);
+            uint32_t line_length = line_length_header.length;
+            // length header is not included in the "line length" header value itself
+            // so subtract 4 from read_bytes
+            // TODO update to dynamically account for size of header
+            uint32_t skip_count = line_length - (read_bytes - 4);
+            debugf("line length = %u, already read = %ld, so moving %u bytes from position 0x%08llx to next line\n",
+                line_length, read_bytes - 4, skip_count, (long long) input_fstream.tellg());
+            input_fstream.seekg(skip_count, input_fstream.cur);
+        }
+
+
+    } // end line loop
+    debugf("matched_line_count: %lu\n", matched_line_count);
+
+}
 
 void gap_analysis(const std::string& input_filename) {
     std::ifstream input_fstream(input_filename);
@@ -659,7 +1037,7 @@ void gap_analysis(const std::string& input_filename) {
 
 
     while (true) {
-        if (input_fstream.eof()) {
+        if (input_fstream.eof() || input_fstream.peek() == eof) {
             // done
             debugf("Finished decompressing lines");
             break;
@@ -718,6 +1096,24 @@ int main(int argc, char **argv) {
         if (status < 0) {
             std::cerr << "Error in compression of file" << std::endl;
         }
+    } else if (action == "query") {
+        std::string input_filename(argv[2]);
+        std::string reference_name(argv[3]);
+        std::string start_position_str(argv[4]);
+        std::string end_position_str(argv[5]);
+        bool conversion_success = false;
+        uint64_t start_position = str_to_uint64(start_position_str, conversion_success);
+        if (!conversion_success) {
+            std::cerr << "Start position must be an integer: " << start_position_str << std::endl;
+            return 1;
+        }
+        uint64_t end_position = str_to_uint64(end_position_str, conversion_success);
+        if (!conversion_success) {
+            std::cerr << "End position must be an integer: " << end_position_str << std::endl;
+            return 1;
+        }
+        VcfCoordinateQuery query(reference_name, start_position, end_position);
+        query_compressed_file(input_filename, query);
     }
     // } else if (action == "decompress") {
     //     status = decompress2(input_filename, output_filename);
