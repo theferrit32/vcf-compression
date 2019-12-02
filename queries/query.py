@@ -13,6 +13,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 bgzip_dir = '/home/me/dev/stanford/1000genomes/'
 bcf_dir = '/home/me/dev/stanford/1000genomes/bcf'
+tabix_cmd = '/home/me/Documents/school/masters-thesis/htslib/tabix'
 
 def get_bgzip_file_path(reference_name):
     if reference_name == 'Y':
@@ -25,7 +26,7 @@ def get_bgzip_file_path(reference_name):
 
 def get_bcf_file_path(reference_name):
     if reference_name in ('Y', 'X'):
-        basename = 'ALL.chrY.phase3_shapeit2_mvncall_integrated.20130502.genotypes.bcf'
+        basename = 'ALL.chr%s.phase3_shapeit2_mvncall_integrated.20130502.genotypes.bcf'
         return os.path.join(bcf_dir, basename % reference_name)
     else:
         basename = 'ALL.chr%s.phase3_shapeit2_mvncall_integrated_v5.20130502.genotypes.bcf'
@@ -36,7 +37,7 @@ def tabix(path, chrom, start, end):
     start = int(start)
     end = int(end)
     cmd = [
-        '/home/me/Documents/school/masters-thesis/htslib/tabix',
+        tabix_cmd,
         path,
         '%s:%d-%d' % (chrom, start, end)
     ]
@@ -46,6 +47,9 @@ def tabix(path, chrom, start, end):
     duration = round(time.time() - s_time, 6)
     return duration
 
+####
+# This returns the coordinates for the gene_symbol passed in.
+# If not cached in local sqlite db, it queries the Ensembl REST API.
 def get_gene_coordinates(gene_symbol):
     def getconn():
         db_path = 'gene_coordinates_hg19.db'
@@ -106,6 +110,9 @@ def get_gene_coordinates(gene_symbol):
 def bzgip_find_first_startpos_atleast(bgzip_file_path, min_start_position):
     pass
 
+def vcfc_find_first_startpos_atleast(vcfc_file_path, min_start_position):
+    pass
+
 def main():
     coords = [
         get_gene_coordinates('TP53'),
@@ -124,8 +131,8 @@ def main():
         get_gene_coordinates('ESR1'),
         get_gene_coordinates('AKT1')
     ]
-    iterations = 1
 
+    iterations = 3
     gene_benchmarks = {}
 
     def add_benchmark(gene_name, benchmark_type, benchmark_time):
@@ -182,7 +189,8 @@ def main():
             bcf_y.append(benchmark['BCF+CSI'])
 
         plt.xlabel('Scheme')
-plt.ylabel('Time (seconds)')
+        plt.ylabel('Time (seconds)')
+        plt.show()
 
 if __name__ == '__main__':
     exit(main())

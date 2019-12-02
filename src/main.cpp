@@ -335,6 +335,7 @@ int compress_data_line(const std::string& line, const VcfCompressionSchema& sche
 
     //debugf("quality: %s, filter: %s\n", quality.c_str(), filter.c_str());
 
+    debugf("reference_name = %s, pos = %s\n", ref_name.c_str(), position.c_str());
     uint64_t required_length = 7 + ref_name.size() + position.size() + id.size() +
         ref_bases.size() + alt_bases.size() + quality.size() + filter.size() + info.size();
 
@@ -380,10 +381,13 @@ int compress_data_line(const std::string& line, const VcfCompressionSchema& sche
         samples[idx] = val;
         terms.pop_back();
     }
-    // for (size_t i = 0; i < samples.size(); i++) {
-    //     debugf("%s ", samples[i].c_str());
-    // }
-    // debugf("\n");
+    #ifdef DEBUG
+    debugf("SAMPLES: ");
+    for (size_t i = 0; i < samples.size(); i++) {
+        debugf("%s ", samples[i].c_str());
+    }
+    debugf("\n");
+    #endif
 
 
     for (size_t i = 0; i < samples.size(); i++) {
@@ -507,6 +511,9 @@ int compress(const std::string& input_filename, const std::string& output_filena
             //lineStateMachine.to_variant();
             compressed_line.clear();
             /*int status = */compress_data_line(linebuf, schema, compressed_line, true);
+            if (compressed_line.back() != '\n') {
+                throw std::runtime_error("No newline at end of compressed line!");
+            }
             for (std::vector<byte_t>::iterator iter = compressed_line.begin(); iter != compressed_line.end(); iter++) {
                 output_fstream.write((const char*)(&(*iter)), 1);
             }
@@ -674,9 +681,15 @@ int decompress2_data_line(
                 line_byte_count++;
                 // TODO handle newline ?
                 if (b == '\n') {
-
+                    // newline after uncompressed sample value
+                    ucounter++;
+                    line_sample_count++;
+                    if (ucounter != uncompressed_count) {
+                        throw VcfValidationError("Reached end of line before reading all decompressed columns");
+                    }
+                    input_fstream.putback(b);
                 }
-                if (b == '\t') {
+                else if (b == '\t') {
                     // don't push tabs, handled outside if
                     ucounter++;
                     line_tab_count++;
