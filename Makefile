@@ -1,5 +1,7 @@
 
-default: main release
+default: main
+
+all: main release
 
 main: src/main.cpp src/utils.hpp
 	g++ -Wall -std=c++11 -DDEBUG -o $@ $^
