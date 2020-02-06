@@ -101,10 +101,13 @@ std::string string_format(const char* format, ...) {
     va_start(va, format);
 
     int buflen = vsnprintf(buf, 0, format, va);
+    va_end(va);
+    buflen++; // for '\0'
     buf = (char*) calloc(buflen, sizeof(char));
 
     va_start(va, format);
     vsnprintf(buf, buflen, format, va);
+    va_end(va);
 
     std::string buf_string(buf);
     free(buf);
@@ -131,6 +134,22 @@ void push_string_to_byte_vector(std::vector<byte_t>& v, const std::string& s) {
     }
 }
 
+std::string byte_vector_to_string(const std::vector<byte_t>& v) {
+    std::ostringstream os;
+    bool first = true;
+    //for (size_t iter = v.begin(); iter != v.end(); iter++) {
+    for (size_t vi = 0; vi < v.size(); vi++) {
+        if (!first) {
+            os << " ";
+        }
+        first = false;
+        std::string byte_str = string_format("%02X", v[vi]);
+        debugf("%s byte_str: %s\n", __FUNCTION__, byte_str.c_str());
+        os << byte_str.c_str();
+    }
+    return os.str();
+}
+
 uint64_t str_to_uint64(const std::string& s, bool& success) {
     char *buf = (char*) calloc(s.size() + 1, sizeof(char));
     memcpy(buf, s.c_str(), s.size());
@@ -144,6 +163,35 @@ uint64_t str_to_uint64(const std::string& s, bool& success) {
     free(buf);
     success = true;
     return val;
+}
+
+// Return value must be deleted by caller
+void uint64_to_uint8_array(uint64_t val, uint8_t bytes[8]) {
+    //uint8_t *bytes = new uint8_t[8];
+    uint64_t FF_low = 0x00000000000000FF;
+    bytes[0] = (val >> 56) & (FF_low << 0);
+    bytes[1] = (val >> 48) & (FF_low << 8);
+    bytes[2] = (val >> 40) & (FF_low << 16);
+    bytes[3] = (val >> 32) & (FF_low << 24);
+    bytes[4] = (val >> 24) & (FF_low << 32);
+    bytes[5] = (val >> 16) & (FF_low << 40);
+    bytes[6] = (val >> 8)  & (FF_low << 48);
+    bytes[7] = (val >> 0)  & (FF_low << 56);
+    //return bytes;
+}
+
+void uint8_array_to_uint64(uint8_t bytes[8], uint64_t *val) {
+    uint64_t zero64 = 0x0000000000000000;
+    uint64_t FF_low = 0x00000000000000FF;
+    *val =
+        (((bytes[0] | zero64) << 56) & (FF_low << 56)) |
+        (((bytes[1] | zero64) << 48) & (FF_low << 48)) |
+        (((bytes[2] | zero64) << 40) & (FF_low << 40)) |
+        (((bytes[3] | zero64) << 32) & (FF_low << 32)) |
+        (((bytes[4] | zero64) << 24) & (FF_low << 24)) |
+        (((bytes[5] | zero64) << 16) & (FF_low << 16)) |
+        (((bytes[6] | zero64) << 8)  & (FF_low << 8))  |
+        (((bytes[7] | zero64) << 0)  & (FF_low << 0));
 }
 
 #endif
