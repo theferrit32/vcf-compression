@@ -137,30 +137,28 @@ void push_string_to_byte_vector(std::vector<byte_t>& v, const std::string& s) {
 std::string byte_vector_to_string(const std::vector<byte_t>& v) {
     std::ostringstream os;
     bool first = true;
-    //for (size_t iter = v.begin(); iter != v.end(); iter++) {
     for (size_t vi = 0; vi < v.size(); vi++) {
         if (!first) {
             os << " ";
         }
         first = false;
         std::string byte_str = string_format("%02X", v[vi]);
-        debugf("%s byte_str: %s\n", __FUNCTION__, byte_str.c_str());
         os << byte_str.c_str();
     }
     return os.str();
 }
 
 uint64_t str_to_uint64(const std::string& s, bool& success) {
-    char *buf = (char*) calloc(s.size() + 1, sizeof(char));
-    memcpy(buf, s.c_str(), s.size());
+    //char *buf = (char*) calloc(s.size() + 1, sizeof(char));
+    //memcpy(buf, s.c_str(), s.size());
     char *endptr = NULL;
-    long val = std::strtol(buf, &endptr, 10);
-    if (endptr != (buf + s.size())) {
-        free(buf);
+    long val = std::strtoul(s.c_str(), &endptr, 10);
+    if (endptr != (s.c_str() + s.size())) {
+        //free(buf);
         success = false;
         return 0;
     }
-    free(buf);
+    //free(buf);
     success = true;
     return val;
 }

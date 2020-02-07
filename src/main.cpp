@@ -7,9 +7,12 @@
 #include <regex>
 #include <stdexcept>
 #include <cstdio>
-#include "utils.hpp"
 
-//#define USAGE() {std::cerr << "./main <vcf-file>" << std::endl; return 1;}
+// for timing
+#include <chrono>
+
+// local header
+#include "utils.hpp"
 
 int usage() {
     std::cerr << "./main [compress|decompress|sparsify] <input_file> <output_file>" << std::endl;
@@ -47,27 +50,31 @@ class VcfCoordinateQuery {
 public:
     VcfCoordinateQuery(
             const std::string& reference_name,
-            int64_t start_position,
-            int64_t end_position) {
+            uint64_t start_position,
+            uint64_t end_position) {
         this->reference_name = reference_name;
         this->start_position = start_position;
+        this->has_start_position = true;
         this->end_position = end_position;
+        this->has_end_position = true;
     }
 
     VcfCoordinateQuery() {
         this->reference_name = "";
         this->start_position = -1;
         this->end_position = -1;
+        this->has_start_position = false;
+        this->has_end_position = false;
     }
 
-    bool matches(const std::string& reference_name, int64_t position) {
+    bool matches(const std::string& reference_name, uint64_t position) {
         if (this->reference_name.size() > 0 && this->reference_name != reference_name) {
             return false;
         }
-        if (this->start_position >= 0 && this->start_position > position) {
+        if (this->has_start_position && this->start_position > position) {
             return false;
         }
-        if (this->end_position >= 0 && this->end_position < position) {
+        if (this->has_end_position && this->end_position < position) {
             return false;
         }
         return true;
@@ -83,18 +90,20 @@ public:
         return this->reference_name;
     }
 
-    int64_t get_start_position() {
+    uint64_t get_start_position() {
         return this->start_position;
     }
 
-    int64_t get_end_position() {
+    uint64_t get_end_position() {
         return this->end_position;
     }
 
 private:
     std::string reference_name;
-    int64_t start_position;
-    int64_t end_position;
+    uint64_t start_position;
+    bool has_start_position;
+    uint64_t end_position;
+    bool has_end_position;
 };
 
 class VcfLineStateMachine {
@@ -538,7 +547,8 @@ const int eof = std::char_traits<char>::eof();
  * Reads from input_fstream to decompress one line from the vcfc file.
  * Schema must match the actual schema of the file.
  *
- * Appends the decompressed line to linebuf.
+ * NOTE: Appends the decompressed line to linebuf. Usually caller
+ * should send an empty linebuf.
  */
 int decompress2_data_line(
         std::ifstream& input_fstream,
@@ -899,12 +909,13 @@ int decompress2(const std::string& input_filename, const std::string& output_fil
 class SparsificationConfiguration {
 public:
     SparsificationConfiguration() {
+        uint8_t ref_map_val = 1; // counter val for ref -> int map
         for (size_t ref_idx = 0; ref_idx < references.size(); ref_idx++) {
             n_map[references[ref_idx]] = ref_map_val++;
         }
     }
 
-    size_t compute_sparse_offset( 
+    size_t compute_sparse_offset(
             const std::string& reference_name,
             size_t pos) {
         size_t block_offset = this->block_size * this->n_map[reference_name] * this->max_position;
@@ -913,17 +924,64 @@ public:
         return offset;
     }
 
+    uint8_t reference_to_int(std::string reference_name) {
+        return this->n_map[reference_name];
+    }
+
     // sparsification constant values
     const int multiplication_factor = 4;  // F: offset block multiplier, dependent on VCF file, number of samples
     const int block_size = 4096;          // B: 4k
     //int min_position = 1;           // min vcf pos. VCFv4.3 defines this as 1
     const int max_position = 300000000;   // L: 300 million, should be size of largest reference
-    std::map<std::string,uint8_t> n_map;
     const std::vector<std::string> references = {
-        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", 
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
         "13", "14", "15", "16", "17", "18", "19", "20", "21", "22",
         "X", "Y", "M"};
-    uint8_t ref_map_val = 1;
+
+private:
+    std::map<std::string,uint8_t> n_map;
+};
+
+class SplitIterator {
+public:
+    class SplitIteratorNoSuchElementError : std::logic_error {
+    public:
+        explicit SplitIteratorNoSuchElementError(const std::string& message):
+        std::logic_error(message.c_str())
+        {}
+    };
+
+    SplitIterator(const std::string& str, const std::string& delim):
+        str(str), delim(delim) {
+        // this->str = str;
+        // this->delim = delim;
+    }
+
+    bool has_next() {
+        return cur_idx <= str.length();
+    }
+
+    std::string next() {
+        if (has_next()) {
+            size_t next_idx = str.find(delim, cur_idx);
+            if (next_idx != std::string::npos) {
+                std::string r = str.substr(cur_idx, (next_idx - cur_idx));
+                cur_idx = next_idx + delim.length();
+                return r;
+            } else {
+                // no remaining delims, rest of str is last term
+                std::string r = str.substr(cur_idx, str.length() - cur_idx);
+                cur_idx = str.length() + 1;
+                return r;
+            }
+        }
+        throw SplitIteratorNoSuchElementError("No next element");
+    }
+
+private:
+    std::string str;
+    std::string delim;
+    size_t cur_idx = 0;
 };
 
 void query_sparse_file(const std::string& input_filename, VcfCoordinateQuery query) {
@@ -942,10 +1000,10 @@ void query_sparse_file(const std::string& input_filename, VcfCoordinateQuery que
     debugf("data_start_offset = %lu\n", data_start_offset);
 
     // Single variant lookup
-    if (query.has_criteria()) {
+    if (query.has_criteria() && (query.get_start_position() == query.get_end_position())) {
         debugf("Single variant lookup\n");
         size_t variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_start_position());
-        
+
         debugf("variant_offset = %lu, file_offset = %lu\n", variant_offset, data_start_offset + variant_offset);
 
         //size_t current_offset = input_fstream.tellg();
@@ -961,17 +1019,92 @@ void query_sparse_file(const std::string& input_filename, VcfCoordinateQuery que
             printf("%c", linebuf[i]);
         }
         printf("\n");
-        
-
-    } 
+    }
     // Multi-variant lookup
     else if (query.has_criteria() && (query.get_start_position() != query.get_end_position())) {
-        debugf("Multi-variant query\n");
+        debugf("Multiple variant lookup\n");
+        size_t start_variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_start_position());
+
+        debugf("start of range: variant_offset = %lu, file_offset = %lu\n", start_variant_offset, data_start_offset + start_variant_offset);
+
+        // seek to start of range
+        input_fstream.seekg(data_start_offset + start_variant_offset);
+
+        // max offset of the beginning of the last matching variant line
+        // size_t end_variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_end_position());
+
+        std::string linebuf;
+        size_t linelength;
+        debugf("Starting linear variant enumeration from reference = %s %lu to %lu\n",
+                query.get_reference_name().c_str(),
+                query.get_start_position(),
+                query.get_end_position());
+
+        while (true) {
+            // Important
+            linebuf.clear();
+
+            uint64_t distance_to_previous, distance_to_next;
+            size_t line_start_offset = input_fstream.tellg();
+            input_fstream.read((char *)&distance_to_previous, 8);
+            input_fstream.read((char *)&distance_to_next, 8);
+            debugf("distance_to_previous = %lu, distance_to_next = %lu\n", distance_to_previous, distance_to_next);
+
+            decompress2_data_line(input_fstream, schema, linebuf, &linelength);
+
+            debugf("compressed bytes read: %lu\n", linelength);
+            // Update distance_to_next based on bytes already read from input stream
+            //distance_to_next += linelength + 16; // line length plus 2 uint64s at start
+            size_t bytes_read_so_far = ((size_t)input_fstream.tellg() - line_start_offset);
+            distance_to_next -= bytes_read_so_far;
+            debugf("bytes_read_so_far = %lu, new distance_to_next = %lu\n", bytes_read_so_far, distance_to_next);
+
+            // time copy of linebuf
+
+            std::chrono::time_point<std::chrono::high_resolution_clock> start =
+                std::chrono::high_resolution_clock::now();
+            SplitIterator spi(linebuf, "\t");
+            std::chrono::time_point<std::chrono::high_resolution_clock> end =
+                std::chrono::high_resolution_clock::now();
+            std::chrono::nanoseconds duration =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("SplitIterator construction time: %lu\n", duration.count());
+
+
+
+            std::string reference_name = spi.next();
+            std::string pos_str = spi.next();
+            char *endptr;
+            size_t pos = std::strtoul(pos_str.c_str(), &endptr, 10);
+            if (endptr != pos_str.data() + pos_str.size()) {
+                throw new std::runtime_error("Couldn't parse pos column: " + pos_str);
+            }
+            debugf("line reference_name = %s, pos = %lu; query reference_name = %s, end_position = %lu\n",
+                    reference_name.c_str(), pos,
+                    query.get_reference_name().c_str(), query.get_end_position());
+
+            if (reference_name == query.get_reference_name() && pos <= query.get_end_position()) {
+                // Meets filter criteria, print the line
+                puts(linebuf.c_str());
+                //std::cout << linebuf; // newline included already
+                // for (size_t i = 0; i < linebuf.length(); i++) {
+                //     printf("%c", linebuf[i]);
+                // }
+                //printf("\n");
+                debugf("Seeking ahead to next line\n");
+                input_fstream.seekg(distance_to_next, std::istream::cur);
+                debugf("Now at address %lu\n", (size_t) input_fstream.tellg());
+                continue;
+            } else {
+                break;
+            }
+        }
 
     }
     // No filter
     else {
         debugf("No filter criteria\n");
+        throw std::runtime_error("sparse query with no filter is not yet implemented\n");
         uint8_t first_skip_bytes[8];
         input_fstream.read((char*)&first_skip_bytes, 8);
         uint64_t first_skip_count;
@@ -1080,14 +1213,7 @@ void sparsify_file(const std::string& compressed_input_filename, const std::stri
         line_bytes.push_back(required_columns_length_header_bytes[2]);
         line_bytes.push_back(required_columns_length_header_bytes[3]);
 
-        #ifdef DEBUG
         debugf("line_bytes with headers only: %s\n", byte_vector_to_string(line_bytes).c_str());
-        for (size_t vi = 0; vi < line_bytes.size(); vi++) {
-           printf(string_format("%02X ", line_bytes[vi]).c_str());
-        }
-        printf("\n");
-
-        #endif
 
         // keep track of some column values as we go across, for offset calculation
         bool got_reference_name = false;
@@ -1099,7 +1225,7 @@ void sparsify_file(const std::string& compressed_input_filename, const std::stri
 
         // iterate over the rest of the line
         // subtract 4 due to length of required_columns_length_header_bytes, which are already read
-        while (i++ < line_length_header.length - 4) { 
+        while (i++ < line_length_header.length - 4) {
             if (input_fstream.eof() || input_fstream.peek() == eof) {
                 std::string msg = string_format("Unexpectedly reached end of compressed file, line header said %d, but only read %d bytes from line",
                         line_length_header.length, i);
@@ -1139,48 +1265,53 @@ void sparsify_file(const std::string& compressed_input_filename, const std::stri
         }
 
         // Compute sparse file offset for this line
-        // size_t block_offset = block_size * n_map[reference_name] * max_position;
-        // size_t in_block_offset =  pos * (multiplication_factor * block_size);
-        // size_t offset = block_offset + in_block_offset;
-        size_t offset = sparse_config.compute_sparse_offset(reference_name, pos);
-        debugf("variant_offset = %lu\n", offset);
+        size_t variant_offset = sparse_config.compute_sparse_offset(reference_name, pos);
+        size_t file_offset = variant_offset + data_start_offset;
+        debugf("variant_offset = %lu, file_offset = %lu\n", variant_offset, file_offset);
 
         // Store uint64 number bytes back to previous line start
-        uint32_t count_to_prev = offset - previous_offset;
+        uint32_t count_to_prev = file_offset - previous_offset;
         uint8_t offset_bytes[8];
         uint64_to_uint8_array(count_to_prev, offset_bytes);
         for (int offi = 0; offi < 8; offi++) {
             line_bytes[offi] = offset_bytes[offi];
         }
+        debugf("line_bytes (size=%lu): %s\n", line_bytes.size(), byte_vector_to_string(line_bytes).c_str());
 
-        
+
         // If this is not the first line, update previous next byte offset
         // with int32 number of bytes forward to this line start
         if (is_first_line) {
             // Write out the first count representing the number of bytes from the start of variant data
             // to the start of the first line. Reader should skip ahead this many bytes.
             output_fstream.seekp(data_start_offset - 8);
-            debugf("Writing first skip uint64_t length: %lu\n", offset);
-            output_fstream.write((const char*)&offset, 8);
+            debugf("Writing first skip uint64_t length: %lu\n", variant_offset);
+            output_fstream.write((const char*)&variant_offset, 8);
 
             is_first_line = false;
         } else {
             debugf("Updating previous line next byte diff\n");
             size_t current_offset = output_fstream.tellp();
-            output_fstream.seekp(previous_offset + data_start_offset + 8);
-            uint64_t diff = current_offset - previous_offset;
-            debugf("Updating previous next diff to %lu\n", diff);
-            output_fstream.write((const char*)&diff, 8);
-            output_fstream.seekp(current_offset);
+            size_t prev_distance_to_next_address = previous_offset + 8;
+            output_fstream.seekp(prev_distance_to_next_address);
+            uint64_t prev_distance_to_next = file_offset - previous_offset;
+            debugf("Updating previous distance_to_next at address %lu to %lu\n",
+                    prev_distance_to_next_address,
+                    prev_distance_to_next);
+            output_fstream.write((const char*)&prev_distance_to_next, 8);
+            output_fstream.seekp(current_offset); // back to current location
         }
-        
+
 
         // Seek to this offset in the output file
-        debugf("max_position = %d, block_size = %d, multiplication_factor = %d, n_map = %d\n",
+        debugf("max_position = %d, block_size = %d, multiplication_factor = %d, ref_int = %d\n",
             sparse_config.max_position, sparse_config.block_size,
-            sparse_config.multiplication_factor, sparse_config.n_map[reference_name]);
-        debugf("Seeking to output file offset: %lu\n", offset + data_start_offset);
-        output_fstream.seekp(offset + data_start_offset);
+            sparse_config.multiplication_factor, sparse_config.reference_to_int(reference_name));
+        debugf("Seeking to output file_offset: %lu\n", file_offset);
+        output_fstream.seekp(file_offset);
+
+        //previous_offset = output_fstream.tellp();
+        previous_offset = file_offset; // update prev address pointer
 
         // Write the compressed line bytes to the sparse file
         for (auto iter = line_bytes.begin(); iter != line_bytes.end(); iter++) {
@@ -1201,7 +1332,7 @@ void sparsify_file(const std::string& compressed_input_filename, const std::stri
 //     }
 
 //     VcfLineStateMachine::State next_line_type() {
-        
+
 //     }
 // private:
 //     std::string filename;
@@ -1454,7 +1585,6 @@ int main(int argc, char **argv) {
         std::string output_filename(argv[3]);
         sparsify_file(input_filename, output_filename);
     } else if (action == "sparse-query") {
-
         std::string input_filename(argv[2]);
         std::string reference_name(argv[3]);
         std::string start_position_str(argv[4]);
