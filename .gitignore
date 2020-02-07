@@ -2,6 +2,9 @@
 main
 main_release
 
+# editor files
+.vscode/
+
 # text files
 decompress.log
 compress.log

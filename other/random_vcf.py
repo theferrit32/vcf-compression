@@ -1,8 +1,8 @@
 #!/bin/env python3
 import random, math
 
-sample_count = 10
-variant_count = 50
+sample_count = 1000
+variant_count = 1000000
 alt_count = 2 # valid values: 1, 2, 3
 alt_indexes = range(0, alt_count+1)
 random.seed(5)
@@ -24,7 +24,7 @@ def choice_with_probability(seq, probs):
     s = sum(probs)
     cdist = cumulative_dist(probs)
     r = random.random() * s
-    print('s: %s, r: %.4f' % (s, r))
+    #print('s: %s, r: %.4f' % (s, r))
     for i in range(0, len(seq)):
         if r < cdist[i]:
             return seq[i]
