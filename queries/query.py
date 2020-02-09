@@ -1,19 +1,21 @@
+import os, re, json, time, shutil
 import subprocess
-import os
-import time
 import requests
 import sqlite3
 import logging
-import re
-import json
 import matplotlib.pyplot as plt
 #cmd = tabix ALL.chr16.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz 16:60000-61000
 # vcf.gz 1-22, X, Y = 17007956 KiB, 16.22 GiB
 logging.basicConfig(level=logging.DEBUG)
 
 bgzip_dir = '/home/me/dev/stanford/1000genomes/'
-bcf_dir = '/home/me/dev/stanford/1000genomes/bcf'
-tabix_cmd = '/home/me/Documents/school/masters-thesis/htslib/tabix'
+bcf_dir = '/home/me/dev/stanford/1000genomes/bcf/'
+tabix_cmd = '/home/krferrit/vcf-compression/tabix'
+vcfc_cmd = '/home/krferrit/vcf-compression/main_release'
+sparse_vcfc_ext4_dir = '/mnt/ext4/'
+sparse_vcfc_xfs_dir = '/mnt/xfs/'
+
+ext4_workdir = '/mnt/ext4/'
 
 def get_bgzip_file_path(reference_name):
     if reference_name == 'Y':
@@ -32,8 +34,18 @@ def get_bcf_file_path(reference_name):
         basename = 'ALL.chr%s.phase3_shapeit2_mvncall_integrated_v5.20130502.genotypes.bcf'
         return os.path.join(bcf_dir, basename % reference_name)
 
+def basename_in_dir(file_path, directory_path):
+    if not file_path.startswith('/'):
+        raise RuntimeError('file_path must be absolute: ' + str(file_path))
+    if not directory_path.startswith('/'):
+        raise RuntimeError('directory_path must be absolute: ' + str(directory_path))
+    if file_path.startswith(directory_path):
+        basename = os.path.basename(file_path)
+        if os.path.join(directory_path, basename) == file_path:
+            return True
+    return False
+
 def tabix(path, chrom, start, end):
-    assert(os.path.exists(path))
     start = int(start)
     end = int(end)
     cmd = [
@@ -46,6 +58,22 @@ def tabix(path, chrom, start, end):
     proc.wait()
     duration = round(time.time() - s_time, 6)
     return duration
+
+def sparse_vcfc(path, chrom, start, end):
+    assert(os.path.exists(path))
+    start = int(start)
+    end = int(end)
+    cmd = [
+        vcfc_cmd,
+        path,
+        '%s %d %d' % (chrom, start, end)
+    ]
+    s_time = time.time()
+    proc = subprocess.Popen(cmd, stdin=None, stdout=subprocess.DEVNULL)
+    proc.wait()
+    duration = round(time.time() - s_time, 6)
+    return duration
+
 
 ####
 # This returns the coordinates for the gene_symbol passed in.
@@ -141,6 +169,11 @@ def main():
         print('setting %s benchmark for %s to %s' % (gene_name, benchmark_type, benchmark_time))
         gene_benchmarks[gene_name][benchmark_type] = benchmark_time
 
+    def ensure_file_in_workdir(path, workdir):
+        assert(os.path.exists(path))
+        if not basename_in_dir(path, workdir):
+            shutil.copy(path, workdir)
+
     # BGZIP + TBI location benchmark
     print('Benchmark: BGZIP + TBI')
     for coord in coords:
@@ -171,6 +204,21 @@ def main():
         print('gene: %6s, chromosome: %2s, avg_duration: %f' % (
             coord['gene_name'], chromosome, avg_duration))
 
+    # Sparse VCFC benchmark EXT4
+    print('Benchmark: Sparse VCFC EXT4 (block size=4096)')
+    for coord in coords:
+        chromosome = coord['reference_name']
+        file_path = get_bcf_file_path(chromosome)
+        start = coord['start']
+        end = coord['end']
+        duration = 0.0
+        for _ in range(0, iterations):
+            duration += sparse_vcfc(file_path, chromosome, start, end)
+        avg_duration = duration / iterations
+        add_benchmark(coord['gene_name'], 'Sparse EXT4(4096)', avg_duration)
+        print('gene: %6s, chromosome: %2s, avg_duration: %f' % (
+            coord['gene_name'], chromosome, avg_duration))
+
     print(gene_benchmarks)
 
     show_graph = True
@@ -178,6 +226,7 @@ def main():
         x = []
         bgzip_y = []
         bcf_y = []
+        sparse_vcfc_ext4_4096 = []
 
         for gene_name in gene_benchmarks:
             benchmark = gene_benchmarks[gene_name]
@@ -187,6 +236,7 @@ def main():
             x.append(gene_name)
             bgzip_y.append(benchmark['BGZIP+TBI'])
             bcf_y.append(benchmark['BCF+CSI'])
+            sparse_vcfc_ext4_4096.append(benchmark['Sparse EXT4(4096)'])
 
         plt.xlabel('Scheme')
         plt.ylabel('Time (seconds)')
