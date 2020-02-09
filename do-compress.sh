@@ -1,7 +1,7 @@
 #!/bin/bash
-if [[ -z "$1" ]]; then
+if [ -z "$1" ]; then
     echo "Must provide vcf filename"
-    return 1
+    exit 1
 fi
 
 fname="$1"
