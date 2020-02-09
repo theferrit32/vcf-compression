@@ -248,10 +248,12 @@ public:
                 "Extension count %d not implemented, must be 3",
                 this->extension_count));
         }
+
         this->length_bytes[0] = in[0] & 0x3F; // 00111111
         this->length_bytes[1] = in[1];
         this->length_bytes[2] = in[2];
         this->length_bytes[3] = in[3];
+
         this->length = (this->length_bytes[0] << 24) & (0xFF << 24);
         debugf("length = 0x%08X ", length);
         this->length |= (this->length_bytes[1] << 16) & (0xFF << 16);
@@ -262,10 +264,13 @@ public:
         debugf("length = 0x%08X ", length);
         debugf("\n");
 
-        // this->
-        //     ((this->length_bytes[1] << 16) & (0xFF << 16)) |
-        //     ((this->length_bytes[2] << 8) & (0xFF << 8)) |
-        //     ((this->length_bytes[3] << 24) & (0xFF));
+        // this->length =
+        //     ((this->length_bytes[0] << 24) & (0xFF << 24))
+        //     | ((this->length_bytes[1] << 16) & (0xFF << 16))
+        //     | ((this->length_bytes[2] << 8) & (0xFF << 8))
+        //     | ((this->length_bytes[3] << 0) & (0xFF << 0));
+        // debugf("length = 0x%08X\n", length);
+
         debugf("%s %02X %02X %02X %02X extension_count = %u, length = %u, bytes %02X %02X %02X %02X, bin = %s\n",
             __FUNCTION__, in[0], in[1], in[2], in[3],
             this->extension_count, this->length,
@@ -581,15 +586,16 @@ int decompress2_data_line(
     line_length_header.deserialize(line_length_bytes);
     uint8_t extension_count = line_length_header.extension_count;
     debugf("Line length extension count: %u\n", extension_count);
-    for (uint8_t i = 0; i < extension_count; i++) {
+    for (uint8_t i = 1; i <= extension_count; i++) {
         int ib = input_fstream.get();
         if (ib == eof) {
             debugf("%s, no data in input_fstream\n", __FUNCTION__);
             return -1;
         }
-        line_byte_count++;
-        line_length_bytes[i+1] = 0xFF & ib;
+        // line_byte_count++;
+        line_length_bytes[i] = 0xFF & ib;
     }
+    line_byte_count += extension_count;
     line_length_header.deserialize(line_length_bytes);
     //uint32_t expected_line_length = line_length_header.length;
 
@@ -612,9 +618,10 @@ int decompress2_data_line(
             debugf("%s, no data in input_fstream\n", __FUNCTION__);
             return -1;
         }
-        line_byte_count++;
+        //line_byte_count++;
         required_length_bytes[i+1] = 0xFF & ib;
     }
+    line_byte_count += required_extension_count;
     debugf("Deserializing required length header\n");
     required_length_header.deserialize(required_length_bytes);
     uint32_t required_length = required_length_header.length;
@@ -991,7 +998,18 @@ void query_sparse_file(const std::string& input_filename, VcfCoordinateQuery que
     debugf("Parsing metadata lines and header line\n");
     std::vector<std::string> meta_header_lines;
     meta_header_lines.reserve(256);
+    #ifdef DEBUG
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    start = std::chrono::steady_clock::now();
+    #endif
     decompress2_metadata_headers(input_fstream, meta_header_lines, schema);
+    #ifdef DEBUG
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    debugf("decompress2_metadata_headers time: %lu\n", duration.count());
+    #endif
 
     // Leave default sparse config
     SparsificationConfiguration sparse_config;
@@ -1013,6 +1031,7 @@ void query_sparse_file(const std::string& input_filename, VcfCoordinateQuery que
         input_fstream.seekg(16, std::ifstream::cur);
 
         std::string linebuf;
+        linebuf.reserve(8 * 1024); // 4 KiB
         size_t linelength;
         decompress2_data_line(input_fstream, schema, linebuf, &linelength);
         for (size_t i = 0; i < linebuf.length(); i++) {
@@ -1034,6 +1053,7 @@ void query_sparse_file(const std::string& input_filename, VcfCoordinateQuery que
         // size_t end_variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_end_position());
 
         std::string linebuf;
+        linebuf.reserve(4 * 1024); // 4 KiB
         size_t linelength;
         debugf("Starting linear variant enumeration from reference = %s %lu to %lu\n",
                 query.get_reference_name().c_str(),
@@ -1048,9 +1068,26 @@ void query_sparse_file(const std::string& input_filename, VcfCoordinateQuery que
             size_t line_start_offset = input_fstream.tellg();
             input_fstream.read((char *)&distance_to_previous, 8);
             input_fstream.read((char *)&distance_to_next, 8);
+
             debugf("distance_to_previous = %lu, distance_to_next = %lu\n", distance_to_previous, distance_to_next);
 
+            if (distance_to_previous == 0 && distance_to_next == 0) {
+                // Very unlikely, for now interpret as a hole in the file.
+                // A longer-term solution is to adapt decompress2_data_line to
+                // signal this situation
+
+                // TODO
+            }
+
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
             decompress2_data_line(input_fstream, schema, linebuf, &linelength);
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("decompress2_data_line time: %lu\n", duration.count());
+            #endif
 
             debugf("compressed bytes read: %lu\n", linelength);
             // Update distance_to_next based on bytes already read from input stream
@@ -1060,25 +1097,41 @@ void query_sparse_file(const std::string& input_filename, VcfCoordinateQuery que
             debugf("bytes_read_so_far = %lu, new distance_to_next = %lu\n", bytes_read_so_far, distance_to_next);
 
             // time copy of linebuf
-
-            std::chrono::time_point<std::chrono::high_resolution_clock> start =
-                std::chrono::high_resolution_clock::now();
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
             SplitIterator spi(linebuf, "\t");
-            std::chrono::time_point<std::chrono::high_resolution_clock> end =
-                std::chrono::high_resolution_clock::now();
-            std::chrono::nanoseconds duration =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-            debugf("SplitIterator construction time: %lu\n", duration.count());
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("SplitIterator.constructor time: %lu\n", duration.count());
+            #endif
 
-
-
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
             std::string reference_name = spi.next();
             std::string pos_str = spi.next();
-            char *endptr;
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("SplitIterator.next time: %lu\n", duration.count());
+            #endif
+
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
+            char *endptr = NULL;
             size_t pos = std::strtoul(pos_str.c_str(), &endptr, 10);
             if (endptr != pos_str.data() + pos_str.size()) {
                 throw new std::runtime_error("Couldn't parse pos column: " + pos_str);
             }
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("strtoul time: %lu\n", duration.count());
+            #endif
+
             debugf("line reference_name = %s, pos = %lu; query reference_name = %s, end_position = %lu\n",
                     reference_name.c_str(), pos,
                     query.get_reference_name().c_str(), query.get_end_position());
@@ -1092,7 +1145,16 @@ void query_sparse_file(const std::string& input_filename, VcfCoordinateQuery que
                 // }
                 //printf("\n");
                 debugf("Seeking ahead to next line\n");
+                #ifdef DEBUG
+                start = std::chrono::steady_clock::now();
+                #endif
                 input_fstream.seekg(distance_to_next, std::istream::cur);
+                #ifdef DEBUG
+                end = std::chrono::steady_clock::now();
+                duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+                debugf("input_fstream.seekg time: %lu\n", duration.count());
+                #endif
+
                 debugf("Now at address %lu\n", (size_t) input_fstream.tellg());
                 continue;
             } else {
