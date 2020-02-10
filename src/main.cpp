@@ -8,6 +8,12 @@
 #include <stdexcept>
 #include <cstdio>
 
+// C fileno
+#include <sys/types.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 // for timing
 #include <chrono>
 
@@ -254,37 +260,40 @@ public:
         this->length_bytes[2] = in[2];
         this->length_bytes[3] = in[3];
 
-        this->length = (this->length_bytes[0] << 24) & (0xFF << 24);
-        debugf("length = 0x%08X ", length);
-        this->length |= (this->length_bytes[1] << 16) & (0xFF << 16);
-        debugf("length = 0x%08X ", length);
-        this->length |= (this->length_bytes[2] << 8) & (0xFF << 8);
-        debugf("length = 0x%08X ", length);
-        this->length |= (this->length_bytes[3] << 0) & (0xFF << 0);
-        debugf("length = 0x%08X ", length);
-        debugf("\n");
+        // this->length = (this->length_bytes[0] << 24) & (0xFF << 24);
+        // debugf("length = 0x%08X ", length);
+        // this->length |= (this->length_bytes[1] << 16) & (0xFF << 16);
+        // debugf("length = 0x%08X ", length);
+        // this->length |= (this->length_bytes[2] << 8) & (0xFF << 8);
+        // debugf("length = 0x%08X ", length);
+        // this->length |= (this->length_bytes[3] << 0) & (0xFF << 0);
+        // debugf("length = 0x%08X ", length);
+        // debugf("\n");
 
-        // this->length =
-        //     ((this->length_bytes[0] << 24) & (0xFF << 24))
-        //     | ((this->length_bytes[1] << 16) & (0xFF << 16))
-        //     | ((this->length_bytes[2] << 8) & (0xFF << 8))
-        //     | ((this->length_bytes[3] << 0) & (0xFF << 0));
-        // debugf("length = 0x%08X\n", length);
+        this->length =
+            ((this->length_bytes[0] << 24) /*& (0xFF << 24)*/)
+            | ((this->length_bytes[1] << 16) /*& (0xFF << 16)*/)
+            | ((this->length_bytes[2] << 8) /*& (0xFF << 8)*/)
+            | ((this->length_bytes[3] << 0) /*& (0xFF << 0)*/);
+        debugf("length = %u, 0x%08X\n", length, length);
 
-        debugf("%s %02X %02X %02X %02X extension_count = %u, length = %u, bytes %02X %02X %02X %02X, bin = %s\n",
-            __FUNCTION__, in[0], in[1], in[2], in[3],
-            this->extension_count, this->length,
-            this->length_bytes[0],
-            this->length_bytes[1],
-            this->length_bytes[2],
-            this->length_bytes[3],
-            string_to_bin_string(std::to_string(this->length)).c_str()
-        );
+        // debugf("%s %02X %02X %02X %02X extension_count = %u, length = %u, bytes %02X %02X %02X %02X, bin = %s\n",
+        //     __FUNCTION__, in[0], in[1], in[2], in[3],
+        //     this->extension_count, this->length,
+        //     this->length_bytes[0],
+        //     this->length_bytes[1],
+        //     this->length_bytes[2],
+        //     this->length_bytes[3],
+        //     string_to_bin_string(std::to_string(this->length)).c_str()
+        // );
     }
 
     uint8_t extension_count;
-    uint32_t length;
-    uint8_t length_bytes[LINE_LENGTH_HEADER_MAX_EXTENSION+1];
+    // Important, this assumes little-endian integer layout
+    //union {
+        uint32_t length;
+        uint8_t length_bytes[LINE_LENGTH_HEADER_MAX_EXTENSION+1]; // 4
+    //};
 };
 
 int compress_data_line(const std::string& line, const VcfCompressionSchema& schema, std::vector<byte_t>& byte_vec, bool add_newline) {
@@ -548,13 +557,13 @@ const std::string GT_10("1|0");
 const std::string GT_11("1|1");
 const int eof = std::char_traits<char>::eof();
 
-/**
- * Reads from input_fstream to decompress one line from the vcfc file.
- * Schema must match the actual schema of the file.
- *
- * NOTE: Appends the decompressed line to linebuf. Usually caller
- * should send an empty linebuf.
- */
+// Provides istream::peek function for C FILEs
+int peek(FILE *stream) {
+    int c = fgetc(stream);
+    ungetc(c, stream);
+    return c;
+}
+
 int decompress2_data_line(
         std::ifstream& input_fstream,
         const VcfCompressionSchema& schema,
@@ -705,6 +714,7 @@ int decompress2_data_line(
                     if (ucounter != uncompressed_count) {
                         throw VcfValidationError("Reached end of line before reading all decompressed columns");
                     }
+                    debugf("Putting 0x%02X back into input stream\n", b);
                     input_fstream.putback(b);
                 }
                 else if (b == '\t') {
@@ -762,6 +772,755 @@ int decompress2_data_line(
     }
 
     *compressed_line_length = line_byte_count;
+
+    return 0;
+}
+
+
+int decompress2_data_line_fd(
+        int input_fd,
+        const VcfCompressionSchema& schema,
+        std::string& linebuf,
+        size_t *compressed_line_length) {
+    debugf("%s decompressing line, expecting %lu samples\n", __FUNCTION__, schema.sample_count);
+    // decompress a single variant line
+    //int ib;
+    unsigned char b;
+    #ifdef DEBUG
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    #endif
+
+    // keep track of how many columns we've seen
+    size_t line_byte_count = 0;
+    size_t line_tab_count = 0;
+    size_t line_sample_count = 0;
+
+    // interpret first 1 byte as a skip flag, then up to 3 additional bytes
+    if (read(input_fd, &b, 1) <= 0) {
+        debugf("%s, no data in input_fstream\n", __FUNCTION__);
+        return -1;
+    }
+    // ib = fgetc(input_stream);
+    // debugf("ib = 0x%08X\n", ib);
+    // if (ib == eof) {
+    //     debugf("%s, no data in input_fstream\n", __FUNCTION__);
+    //     return -1;
+    // }
+    // b = 0xFF & ib;
+    line_byte_count++;
+
+    // read the line length header
+    uint8_t line_length_bytes[4] = {b, 0, 0, 0};
+    LineLengthHeader line_length_header;
+    line_length_header.deserialize(line_length_bytes);
+    uint8_t extension_count = line_length_header.extension_count;
+    debugf("Line length extension count: %u\n", extension_count);
+    for (uint8_t i = 1; i <= extension_count; i++) {
+        //char db;
+        if (read(input_fd, &b, 1) <= 0) {
+            debugf("%s, no data in input_fstream\n", __FUNCTION__);
+            return -1;
+        }
+        line_length_bytes[i] = b;
+        // int ib = fgetc(input_stream);
+        // if (ib == eof) {
+        //     debugf("%s, no data in input_fstream\n", __FUNCTION__);
+        //     return -1;
+        // }
+        // line_length_bytes[i] = 0xFF & ib;
+    }
+    line_byte_count += extension_count;
+    line_length_header.deserialize(line_length_bytes);
+    //uint32_t expected_line_length = line_length_header.length;
+
+
+    // read the required column skip length
+    if (read(input_fd, &b, 1) <= 0) {
+        debugf("%s, no data in input_fstream\n", __FUNCTION__);
+        return -1;
+    }
+    // ib = fgetc(input_stream);
+    // if (ib == eof) {
+    //     debugf("%s, no data in input_fstream\n", __FUNCTION__);
+    //     return -1;
+    // }
+    // b = 0xFF & ib;
+    line_byte_count++;
+    uint8_t required_length_bytes[4] = {b, 0, 0, 0};
+    LineLengthHeader required_length_header;
+
+    #ifdef DEBUG
+    start = std::chrono::steady_clock::now();
+    #endif
+    required_length_header.deserialize(required_length_bytes);
+    #ifdef DEBUG
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    debugf("LineLengthHeader.deserialize time: %lu\n", duration.count());
+    #endif
+
+    uint8_t required_extension_count = required_length_header.extension_count;
+    for (uint8_t i = 0; i < required_extension_count; i++) {
+        if (read(input_fd, &b, 1) <= 0) {
+            debugf("%s, no data in input_fstream\n", __FUNCTION__);
+            return -1;
+        }
+        // int ib = fgetc(input_stream);
+        // if (ib == eof) {
+        //     debugf("%s, no data in input_fstream\n", __FUNCTION__);
+        //     return -1;
+        // }
+        required_length_bytes[i+1] = b;
+    }
+    line_byte_count += required_extension_count;
+    debugf("Deserializing required length header\n");
+    #ifdef DEBUG
+    start = std::chrono::steady_clock::now();
+    #endif
+    required_length_header.deserialize(required_length_bytes);
+    #ifdef DEBUG
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    debugf("LineLengthHeader.deserialize time: %lu\n", duration.count());
+    #endif
+
+    uint32_t required_length = required_length_header.length;
+    debugf("Skipping %u bytes for required columns section\n", required_length);
+
+    for (size_t i = 0; i < required_length; i++) {
+        char cb;
+        if (read(input_fd, &cb, 1) <= 0) {
+            throw std::runtime_error("fread error");
+        }
+        // if (fread(&b, sizeof(char), 1, input_stream) < 1) {
+        //     throw std::runtime_error("fread error");
+        // }
+        // //input_fstream.read((char*)&b, 1);
+        // char cb = reinterpret_cast<char&>(b);
+        linebuf.push_back(cb);
+        if (cb == '\t') {
+            line_tab_count++;
+        }
+    }
+    debugf("Finished reading required columns: %s\n", linebuf.c_str());
+    line_byte_count += required_length;
+
+
+    // check to ensure we read in the appropriate number of uncompressed columns
+    // here it expects VCF_REQUIRED_COL_COUNT + 1 because it skips the format column as well
+    if (line_tab_count != VCF_REQUIRED_COL_COUNT + 1) {
+        if (line_tab_count == VCF_REQUIRED_COL_COUNT && schema.sample_count == 0) {
+            // do nothing
+        } else {
+            debugf("line_tab_count: %lu\n", line_tab_count);
+            throw VcfValidationError("Did not read all uncompressed columns");
+            return 0;
+        }
+    }
+
+
+    #ifdef DEBUG
+    start = std::chrono::steady_clock::now();
+    #endif
+
+    bool got_ending_newline = false;
+
+    debugf("Reading sample columns\n");
+    // read the sample columns
+    while (line_sample_count < schema.sample_count) {
+        //debugf("Trying to read a sample column\n");
+        if (read(input_fd, &b, 1) <= 0) {
+            std::ostringstream msg;
+            msg << "Missing samples, expected " << schema.sample_count
+                << ", received " << line_sample_count;
+            throw VcfValidationError(msg.str().c_str());
+        }
+        // ib = peek(input_stream);
+        // b = 0xFF & ib;
+        //debugf("b: %02x\n", (unsigned char)b);
+
+        // if (ib == eof /*|| (char)ib == '\n' || (char)ib == '\t'*/) {
+        //     std::ostringstream msg;
+        //     msg << "Missing samples, expected " << schema.sample_count
+        //         << ", received " << line_sample_count;
+        //     throw VcfValidationError(msg.str().c_str());
+        // }
+        // fgetc(input_stream); // remove peeked char from stream
+        line_byte_count++;
+
+        if ((b & SAMPLE_MASK_00) == SAMPLE_MASKED_00) {
+            // is a 0|0 column
+            uint8_t count = (b & (~SAMPLE_MASK_00)) & 0xFF; // and with inverse of flag mask
+            uint8_t counter = count;
+            debugf("0|0 repeat count: %u\n", count);
+
+            while (counter--) {
+                linebuf.append(GT_00.c_str());
+                linebuf.append(tab);
+            }
+
+            // update line counts
+            line_tab_count += count;
+            line_sample_count += count;
+
+            // remove last tab if at end of line
+            if (line_sample_count >= schema.sample_count) {
+                linebuf.pop_back();
+                line_tab_count--;
+            }
+        } else if ((b & SAMPLE_MASK_UNCOMPRESSED) == SAMPLE_MASKED_UNCOMPRESSED) {
+            uint8_t uncompressed_count = b & (~SAMPLE_MASK_UNCOMPRESSED);
+            debugf("%u uncompressed columns follow\n", uncompressed_count);
+            // uncompressed columns follow
+            uint8_t ucounter = 0; // number of uncompressed columns
+            while (ucounter < uncompressed_count) {
+                if (read(input_fd, &b, 1) <= 0) {
+                    throw std::runtime_error("Couldn't read from input_fd");
+                }
+                // fread(&b, sizeof(char), 1, input_stream);
+                line_byte_count++;
+                // TODO handle newline ?
+                if (b == '\n') {
+                    // newline after uncompressed sample value
+                    ucounter++;
+                    line_sample_count++;
+                    if (ucounter != uncompressed_count) {
+                        throw VcfValidationError("Reached end of line before reading all decompressed columns");
+                    }
+                    // ending newline handled outside loop
+                    debugf("got ending newline\n");
+                    //fputc(b | (int)0x00, input_stream);
+                    // ungetc((int)b, input_stream);
+                    lseek(input_fd, -1, SEEK_CUR);
+                    //got_ending_newline = true;
+                }
+                else if (b == '\t') {
+                    // don't push tabs, handled outside if
+                    ucounter++;
+                    line_tab_count++;
+                    line_sample_count++;
+                    if (line_sample_count < schema.sample_count) {
+                        // if not the last term, include the tab
+                        // otherwise, the tab is handled outside the if
+                        linebuf.push_back(b);
+                    }
+                } else {
+                    linebuf.push_back(b);
+                }
+            }
+        } else {
+            // either 0|1, 1|0, or 1|1
+            byte_t masked = b & SAMPLE_MASK_01_10_11;
+            const std::string *sample_str = NULL;
+
+            if (masked == SAMPLE_MASKED_01) {
+                sample_str = &GT_01;
+            } else if (masked == SAMPLE_MASKED_10) {
+                sample_str = &GT_10;
+            } else if (masked == SAMPLE_MASKED_11) {
+                sample_str = &GT_11;
+            } else {
+                throw std::runtime_error("Error during decompression of compressed file, unrecognized bitmask");
+            }
+
+            // write the sample GT and increment counters
+            uint8_t count = (b & (~SAMPLE_MASK_01_10_11)) & 0xFF;
+            debugf("Got %s, count: %u\n", sample_str->c_str(), count);
+            while (count--) {
+                linebuf.append(*sample_str);
+                line_sample_count++;
+                if (line_sample_count < schema.sample_count /*input_fstream.peek() != '\n'*/) {
+                    linebuf.append(tab);
+                }
+                line_tab_count++;
+            }
+        } // end flag cases
+    } // end sample loop
+    debugf("Finished reading samples\n");
+
+
+    #ifdef DEBUG
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    debugf("decompress-sample-loop time: %lu\n", duration.count());
+    #endif
+
+    // make sure next byte is a newline
+    // ib = fgetc(input_stream);
+    // debugf("ib = 0x%08X\n", ib);
+    // line_byte_count++;
+    // if (ib == '\n') {
+    //     b = (char)ib;
+    //     linebuf.push_back(b);
+    // } else {
+    //     throw VcfValidationError("Sample line did not end in a newline\n");
+    // }
+    // if (got_ending_newline) {
+    //     linebuf.push_back('\n');
+    // } else {
+    //     throw VcfValidationError("Sample line did not end in a newline\n");
+    // }
+
+    if (read(input_fd, &b, 1) <= 0) {
+        throw std::runtime_error("Failed to read line ending");
+    }
+    if (b == '\n') {
+        linebuf.push_back('\n');
+    } else {
+        throw VcfValidationError("Sample line did not end in a newline\n");
+    }
+
+    *compressed_line_length = line_byte_count;
+
+    return 0;
+}
+
+
+/**
+ * Reads from input_fstream to decompress one line from the vcfc file.
+ * Schema must match the actual schema of the file.
+ *
+ * NOTE: Appends the decompressed line to linebuf. Usually caller
+ * should send an empty linebuf.
+ */
+int decompress2_data_line_FILE(
+        FILE *input_stream,
+        const VcfCompressionSchema& schema,
+        std::string& linebuf,
+        size_t *compressed_line_length) {
+    debugf("%s decompressing line, expecting %lu samples\n", __FUNCTION__, schema.sample_count);
+    // decompress a single variant line
+    int ib;
+    unsigned char b;
+    #ifdef DEBUG
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    #endif
+
+    // keep track of how many columns we've seen
+    size_t line_byte_count = 0;
+    size_t line_tab_count = 0;
+    size_t line_sample_count = 0;
+
+    // interpret first 1 byte as a skip flag, then up to 3 additional bytes
+    ib = fgetc(input_stream);
+    debugf("ib = 0x%08X\n", ib);
+    if (ib == eof) {
+        debugf("%s, no data in input_fstream\n", __FUNCTION__);
+        return -1;
+    }
+    line_byte_count++;
+    b = 0xFF & ib;
+
+    // read the line length header
+    uint8_t line_length_bytes[4] = {b, 0, 0, 0};
+    LineLengthHeader line_length_header;
+    line_length_header.deserialize(line_length_bytes);
+    uint8_t extension_count = line_length_header.extension_count;
+    debugf("Line length extension count: %u\n", extension_count);
+    for (uint8_t i = 1; i <= extension_count; i++) {
+        int ib = fgetc(input_stream);
+        if (ib == eof) {
+            debugf("%s, no data in input_fstream\n", __FUNCTION__);
+            return -1;
+        }
+        // line_byte_count++;
+        line_length_bytes[i] = 0xFF & ib;
+    }
+    line_byte_count += extension_count;
+    line_length_header.deserialize(line_length_bytes);
+    //uint32_t expected_line_length = line_length_header.length;
+
+
+    // read the required column skip length
+    ib = fgetc(input_stream);
+    if (ib == eof) {
+        debugf("%s, no data in input_fstream\n", __FUNCTION__);
+        return -1;
+    }
+    line_byte_count++;
+    b = 0xFF & ib;
+    uint8_t required_length_bytes[4] = {b, 0, 0, 0};
+    LineLengthHeader required_length_header;
+
+    #ifdef DEBUG
+    start = std::chrono::steady_clock::now();
+    #endif
+    required_length_header.deserialize(required_length_bytes);
+    #ifdef DEBUG
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    debugf("LineLengthHeader.deserialize time: %lu\n", duration.count());
+    #endif
+
+    uint8_t required_extension_count = required_length_header.extension_count;
+    for (uint8_t i = 0; i < required_extension_count; i++) {
+        int ib = fgetc(input_stream);
+        if (ib == eof) {
+            debugf("%s, no data in input_fstream\n", __FUNCTION__);
+            return -1;
+        }
+        //line_byte_count++;
+        required_length_bytes[i+1] = 0xFF & ib;
+    }
+    line_byte_count += required_extension_count;
+    debugf("Deserializing required length header\n");
+    #ifdef DEBUG
+    start = std::chrono::steady_clock::now();
+    #endif
+    required_length_header.deserialize(required_length_bytes);
+    #ifdef DEBUG
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    debugf("LineLengthHeader.deserialize time: %lu\n", duration.count());
+    #endif
+
+    uint32_t required_length = required_length_header.length;
+    debugf("Skipping %u bytes for required columns section\n", required_length);
+
+    for (size_t i = 0; i < required_length; i++) {
+        if (fread(&b, sizeof(char), 1, input_stream) < 1) {
+            throw std::runtime_error("fread error");
+        }
+        //input_fstream.read((char*)&b, 1);
+        char cb = reinterpret_cast<char&>(b);
+        linebuf.push_back(cb);
+        if (cb == '\t') {
+            line_tab_count++;
+        }
+    }
+    debugf("Finished reading required columns: %s\n", linebuf.c_str());
+    line_byte_count += required_length;
+
+
+    // check to ensure we read in the appropriate number of uncompressed columns
+    // here it expects VCF_REQUIRED_COL_COUNT + 1 because it skips the format column as well
+    if (line_tab_count != VCF_REQUIRED_COL_COUNT + 1) {
+        if (line_tab_count == VCF_REQUIRED_COL_COUNT && schema.sample_count == 0) {
+            // do nothing
+        } else {
+            debugf("line_tab_count: %lu\n", line_tab_count);
+            throw VcfValidationError("Did not read all uncompressed columns");
+            return 0;
+        }
+    }
+
+
+    #ifdef DEBUG
+    start = std::chrono::steady_clock::now();
+    #endif
+
+    debugf("Reading sample columns\n");
+    // read the sample columns
+    while (line_sample_count < schema.sample_count) {
+        debugf("Trying to read a sample column\n");
+        ib = peek(input_stream);
+        b = 0xFF & ib;
+        debugf("b: %02x\n", (unsigned char)b);
+
+        if (ib == eof /*|| (char)ib == '\n' || (char)ib == '\t'*/) {
+            std::ostringstream msg;
+            msg << "Missing samples, expected " << schema.sample_count
+                << ", received " << line_sample_count;
+            throw VcfValidationError(msg.str().c_str());
+        }
+        fgetc(input_stream); // remove peeked char from stream
+        line_byte_count++;
+
+        if ((b & SAMPLE_MASK_00) == SAMPLE_MASKED_00) {
+            // is a 0|0 column
+            uint8_t count = (b & (~SAMPLE_MASK_00)) & 0xFF; // and with inverse of flag mask
+            uint8_t counter = count;
+            debugf("0|0 repeat count: %u\n", count);
+
+            while (counter--) {
+                linebuf.append(GT_00.c_str());
+                linebuf.append(tab);
+            }
+
+            // update line counts
+            line_tab_count += count;
+            line_sample_count += count;
+
+            // remove last tab if at end of line
+            if (line_sample_count >= schema.sample_count) {
+                linebuf.pop_back();
+                line_tab_count--;
+            }
+        } else if ((b & SAMPLE_MASK_UNCOMPRESSED) == SAMPLE_MASKED_UNCOMPRESSED) {
+            uint8_t uncompressed_count = b & (~SAMPLE_MASK_UNCOMPRESSED);
+            debugf("%u uncompressed columns follow\n", uncompressed_count);
+            // uncompressed columns follow
+            uint8_t ucounter = 0; // number of uncompressed columns
+            while (ucounter < uncompressed_count) {
+                fread(&b, sizeof(char), 1, input_stream);
+                line_byte_count++;
+                // TODO handle newline ?
+                if (b == '\n') {
+                    // newline after uncompressed sample value
+                    ucounter++;
+                    line_sample_count++;
+                    if (ucounter != uncompressed_count) {
+                        throw VcfValidationError("Reached end of line before reading all decompressed columns");
+                    }
+                    // ending newline handled outside loop
+                    debugf("Putting 0x%08X back into input stream\n", b | (int)0x00);
+                    //fputc(b | (int)0x00, input_stream);
+                    ungetc((int)b, input_stream);
+                }
+                else if (b == '\t') {
+                    // don't push tabs, handled outside if
+                    ucounter++;
+                    line_tab_count++;
+                    line_sample_count++;
+                    if (line_sample_count < schema.sample_count) {
+                        // if not the last term, include the tab
+                        // otherwise, the tab is handled outside the if
+                        linebuf.push_back(b);
+                    }
+                } else {
+                    linebuf.push_back(b);
+                }
+            }
+        } else {
+            // either 0|1, 1|0, or 1|1
+            byte_t masked = b & SAMPLE_MASK_01_10_11;
+            const std::string *sample_str = NULL;
+
+            if (masked == SAMPLE_MASKED_01) {
+                sample_str = &GT_01;
+            } else if (masked == SAMPLE_MASKED_10) {
+                sample_str = &GT_10;
+            } else if (masked == SAMPLE_MASKED_11) {
+                sample_str = &GT_11;
+            } else {
+                throw std::runtime_error("Error during decompression of compressed file, unrecognized bitmask");
+            }
+
+            // write the sample GT and increment counters
+            uint8_t count = (b & (~SAMPLE_MASK_01_10_11)) & 0xFF;
+            debugf("Got %s, count: %u\n", sample_str->c_str(), count);
+            while (count--) {
+                linebuf.append(*sample_str);
+                line_sample_count++;
+                if (line_sample_count < schema.sample_count /*input_fstream.peek() != '\n'*/) {
+                    linebuf.append(tab);
+                }
+                line_tab_count++;
+            }
+        } // end flag cases
+    } // end sample loop
+    debugf("Finished reading samples\n");
+
+
+    #ifdef DEBUG
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    debugf("decompress-sample-loop time: %lu\n", duration.count());
+    #endif
+
+    // make sure next byte is a newline
+    ib = fgetc(input_stream);
+    debugf("ib = 0x%08X\n", ib);
+    line_byte_count++;
+    if (ib == '\n') {
+        b = (char)ib;
+        linebuf.push_back(b);
+    } else {
+        throw VcfValidationError("Sample line did not end in a newline\n");
+    }
+
+    *compressed_line_length = line_byte_count;
+
+    return 0;
+}
+
+int decompress2_metadata_headers_fd(
+        int input_fd,
+        std::vector<std::string>& output_vector,
+        VcfCompressionSchema& output_schema) {
+    // decompress all metadata and header lines
+    bool got_meta = false, got_header = false;
+    //int i1, i2;
+    char c1, c2;
+    size_t meta_count = 0, header_count = 0;
+
+    std::string linebuf;
+    linebuf.reserve(4096);
+
+
+    debugf("Parsing metadata lines and header line\n");
+    while (true) {
+        debugf("Reading next line\n");
+        linebuf.clear();
+
+        if (read(input_fd, &c1, 1) <= 0 && (!got_header || !got_meta)) {
+            throw VcfValidationError("File ended before a header or metadata line");
+        }
+        debugf("c1: %02x\n", c1);
+        if (c1 != '#') {
+            if (!got_meta || !got_header) {
+                throw VcfValidationError("File was missing headers or metadata");
+            }
+            debugf("%s", "Finished reading metadata and headers\n");
+            // need to undo read
+            debugf("Moving file offset back one\n");
+            lseek(input_fd, -1, SEEK_CUR);
+            break;
+        } else if (got_header == true) {
+            // got a metadata or header row after already receiving a header row
+            throw VcfValidationError("Read a metadata or header row after already reading a header");
+        }
+
+        if (read(input_fd, &c2, 1) <= 0) {
+            throw VcfValidationError("Invalid format, empty header row");
+        }
+
+
+        if (c2 == '#') {
+            if (got_header) {
+                throw VcfValidationError("Got a metadata row after the CSV header");
+            }
+            debugf("Got a metadata line\n");
+            got_meta = true;
+            meta_count++;
+        } else {
+            if (!got_meta) {
+                throw VcfValidationError("Got a header line but no metadata lines");
+            }
+            got_header = true;
+            header_count++;
+        }
+
+        // this is a metadata or header line, so read the rest of the line
+        size_t tab_count = 0;
+        linebuf.push_back(c1);
+        linebuf.push_back(c2);
+
+        while (true) {
+            char c3;
+            if (read(input_fd, &c3, 1) == 0) {
+                debugf("No data lines were in the file\n");
+            }
+            if (c3 == '\n') {
+                linebuf.push_back('\n');
+                break;
+            }
+            if (c3 == '\t') {
+                tab_count++;
+                if (tab_count > VCF_REQUIRED_COL_COUNT) {
+                    output_schema.sample_count++;
+                }
+            }
+            linebuf.push_back(c3);
+        }
+
+        debugf("Line: %s\n", linebuf.c_str());
+        output_vector.push_back(linebuf);
+    }
+    debugf("Line counts: metadata = %ld, header = %ld\n", meta_count, header_count);
+    debugf("Sample count: %ld\n", output_schema.sample_count);
+
+    return 0;
+}
+
+/**
+ * Reads from input_fstream. Assumes stream position is in the metadata section.
+ * Reads all following metadata lines and the header line. If the stream does not conform
+ * to the VCF line specification, throws an error.
+ *
+ * Places all lines read into output_vector, and the schema into output_schema.
+ */
+int decompress2_metadata_headers_FILE(
+        FILE *input_stream,
+        std::vector<std::string>& output_vector,
+        VcfCompressionSchema& output_schema) {
+    // decompress all metadata and header lines
+    bool got_meta = false, got_header = false;
+    int i1, i2;
+    char c1, c2;
+    size_t meta_count = 0, header_count = 0;
+
+    std::string linebuf;
+    linebuf.reserve(4096);
+
+
+    debugf("Parsing metadata lines and header line\n");
+    while (true) {
+        debugf("Reading next line\n");
+        linebuf.clear();
+
+        if ((feof(input_stream) || peek(input_stream) == eof) && (!got_header || !got_meta)) {
+            throw VcfValidationError("File ended before a header or metadata line");
+        }
+        i1 = peek(input_stream);
+        debugf("i1: %02x\n", i1);
+        if (i1 != '#') {
+            if (!got_meta || !got_header) {
+                throw VcfValidationError("File was missing headers or metadata");
+            }
+            debugf("%s", "Finished reading metadata and headers\n");
+            break;
+        } else if (got_header == true) {
+            // got a metadata or header row after already receiving a header row
+            throw VcfValidationError("Read a metadata or header row after already reading a header");
+        } else if (feof(input_stream)) {
+            throw VcfValidationError("Invalid format, empty header row");
+        }
+        i1 = fgetc(input_stream);
+        i2 = fgetc(input_stream);
+        c1 = (char) i1;
+        c2 = (char) i2;
+        //debugf("i2: %02x\n", i2);
+
+        if (i2 == '#') {
+            if (got_header) {
+                throw VcfValidationError("Got a metadata row after the CSV header");
+            }
+            debugf("Got a metadata line\n");
+            got_meta = true;
+            meta_count++;
+        } else {
+            if (!got_meta) {
+                throw VcfValidationError("Got a header line but no metadata lines");
+            }
+            got_header = true;
+            header_count++;
+        }
+
+        // this is a metadata or header line, so read the rest of the line
+        size_t tab_count = 0;
+        linebuf.push_back(c1);
+        linebuf.push_back(c2);
+
+        while (true) {
+            int i3 = fgetc(input_stream);
+            char i3b = 0xFF & i3;
+            //debugf("byte: %02x\n", i3b);
+            if (i3 == eof) {
+                debugf("No data lines were in the file\n");
+            }
+            if (i3b == '\n') {
+                linebuf.push_back('\n');
+                break;
+            }
+            if (i3b == '\t') {
+                tab_count++;
+                if (tab_count > VCF_REQUIRED_COL_COUNT) {
+                    output_schema.sample_count++;
+                }
+            }
+            linebuf.push_back(i3b);
+        }
+
+        debugf("Line: %s\n", linebuf.c_str());
+        output_vector.push_back(linebuf);
+    }
+    debugf("Line counts: metadata = %ld, header = %ld\n", meta_count, header_count);
+    debugf("Sample count: %ld\n", output_schema.sample_count);
 
     return 0;
 }
@@ -990,6 +1749,502 @@ private:
     std::string delim;
     size_t cur_idx = 0;
 };
+
+void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery query) {
+    //std::ifstream input_fstream(input_filename);
+    //FILE *input_stream = fopen(input_filename.c_str(), "r");
+    int input_fd = open(input_filename.c_str(), O_RDONLY);
+
+    VcfCompressionSchema schema;
+    debugf("Parsing metadata lines and header line\n");
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    #ifdef DEBUG
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    start = std::chrono::steady_clock::now();
+    #endif
+    decompress2_metadata_headers_fd(input_fd, meta_header_lines, schema);
+    #ifdef DEBUG
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    debugf("decompress2_metadata_headers time: %lu\n", duration.count());
+    #endif
+
+    // Leave default sparse config
+    SparsificationConfiguration sparse_config;
+
+    long off = lseek(input_fd, 0, SEEK_CUR);
+    if (off < 0) {
+        throw std::runtime_error("ftell failed: " + std::to_string(off));
+    }
+    long data_start_offset = off + 8;
+    uint64_t first_line_offset = 0;
+    if (read(input_fd, &first_line_offset, sizeof(uint64_t) == 0)) {
+        throw std::runtime_error("Failed to read first_line_offset value from file");
+    }
+
+    debugf("data_start_offset = %lu\n", data_start_offset);
+    debugf("first_line_offset = %lu\n", first_line_offset);
+
+    // Single variant lookup
+    if (query.has_criteria() && (query.get_start_position() == query.get_end_position())) {
+        debugf("Single variant lookup\n");
+        size_t variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_start_position());
+
+        debugf("variant_offset = %lu, file_offset = %lu\n", variant_offset, data_start_offset + variant_offset);
+
+        //size_t current_offset = input_fstream.tellg();
+        lseek(input_fd, data_start_offset + variant_offset, SEEK_SET);
+
+        // skip over prev and next jump uint64 counts for single-variant query
+        lseek(input_fd, 16, SEEK_CUR);
+
+        std::string linebuf;
+        linebuf.reserve(4 * 1024); // 4 KiB
+        size_t linelength;
+        decompress2_data_line_fd(input_fd, schema, linebuf, &linelength);
+        for (size_t i = 0; i < linebuf.length(); i++) {
+            printf("%c", linebuf[i]);
+        }
+        //printf("\n");
+    }
+    // Multi-variant lookup
+    else if (query.has_criteria() && (query.get_start_position() != query.get_end_position())) {
+        debugf("Multiple variant lookup\n");
+        size_t start_variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_start_position());
+
+        debugf("start of range: variant_offset = %lu, file_offset = %lu\n", start_variant_offset, data_start_offset + start_variant_offset);
+
+        // seek to start of range
+        long initial_lookup_offset = lseek(input_fd, data_start_offset + start_variant_offset, SEEK_SET);
+
+        long initial_seek_data = lseek(input_fd, initial_lookup_offset, SEEK_DATA);
+
+        debugf("initial_lookup_offset = %ld, initial_seek_data = %ld\n",
+            initial_lookup_offset, initial_seek_data);
+
+        if (initial_lookup_offset != initial_seek_data) {
+            debugf("SEEK_DATA moved from initially requested offset\n");
+            // Update to correspond to a viable start-of-line offset
+            // Below is the viable offset modulo for offsets minus data_start_offset
+            long viable_line_offset_modulo = sparse_config.multiplication_factor * sparse_config.block_size;
+            if ((initial_seek_data - data_start_offset) % viable_line_offset_modulo != 0) {
+                // go backwards to previous viable start offset
+                long previous_viable_line_distance = (initial_seek_data - data_start_offset) % viable_line_offset_modulo;
+                //previous_viable_line_distance += data_start_offset;
+                lseek(input_fd, -previous_viable_line_distance, SEEK_CUR);
+                debugf("Seeked backwards previous_viable_line_distance = %ld\n", previous_viable_line_distance);
+            }
+        }
+
+
+        // Determine if the current offset corresponds to a data line, if not, seek to the next one
+        while (true) {
+            union {
+                struct {
+                    uint64_t distance_to_previous;
+                    uint64_t distance_to_next;
+                } lengths;
+                uint8_t bytes[16];
+            } _length_headers;
+            if (read(input_fd, &_length_headers.bytes, 16) == 0) {
+                throw std::runtime_error("Reached end of file unexpectedly");
+            }
+            debugf("distance_to_previous = %lu, distance_to_next = %lu\n",
+                _length_headers.lengths.distance_to_previous, _length_headers.lengths.distance_to_next);
+
+            // IF prev offset value is zero and this is not the first line, must be an invalid location
+            if (_length_headers.lengths.distance_to_previous == 0 &&
+                    initial_lookup_offset != first_line_offset + data_start_offset) {
+                // seek ahead to next viable line start
+                long seek_distance = sparse_config.multiplication_factor * sparse_config.block_size;
+                seek_distance -= 16; // Already read this many bytes
+                long new_offset = lseek(input_fd, seek_distance, SEEK_CUR);
+                debugf("Offset %ld was not a data line, seeked to next viable offset %ld\n",
+                    new_offset + 16 - seek_distance, new_offset);
+            } else {
+                debugf("Offset was a data location, begin linear traversal\n");
+                lseek(input_fd, -16, SEEK_CUR);
+                break;
+            }
+        }
+
+        // uint64_t distance_to_previous, distance_to_next;
+        // size_t line_start_offset = lseek(input_fd, 0, SEEK_CUR);
+        // //input_fstream.read((char *)&distance_to_previous, 8);
+        // //input_fstream.read((char *)&distance_to_next, 8);
+        // // fread(&distance_to_previous, sizeof(uint64_t), 1, input_stream);
+        // // fread(&distance_to_next, sizeof(uint64_t), 1, input_stream);
+        // if (read(input_fd, &distance_to_previous, sizeof(uint64_t)) <= 0) {
+        //     throw std::runtime_error("couldn't read from file");
+        // }
+        // if (read(input_fd, &distance_to_next, sizeof(uint64_t)) <= 0) {
+        //     throw std::runtime_error("couldn't read from file");
+        // }
+
+        // debugf("distance_to_previous = %lu, distance_to_next = %lu\n", distance_to_previous, distance_to_next);
+
+        // // Not positioned at a data line
+        // if (distance_to_previous == 0 && distance_to_next == 0) {
+        //     // For now interpret as a hole in the file, which is almost certainly the case.
+        //     // A longer-term solution is to adapt decompress2_data_line to
+        //     // signal this situation
+
+        //     // Seek to the next byte after this one that is not sparse
+        //     long cur_offset = lseek(input_fd, 0, SEEK_CUR);
+
+        //     long new_offset = lseek(input_fd, cur_offset, SEEK_DATA);
+
+        //     if (new_offset == cur_offset) {
+        //         debugf("SEEK_DATA did not move from %ld\n", cur_offset);
+        //         // Calculate the next possible start location for a line
+        //         long seek_distance = sparse_config.block_size * sparse_config.multiplication_factor;
+        //         new_offset = lseek(input_fd, line_start_offset + seek_distance, SEEK_SET);
+        //         debugf("Manually seeked from %ld to %ld\n", cur_offset, new_offset);
+        //     } else {
+        //         debugf("Position contained no data, SEEK_DATA from %ld to %ld\n", cur_offset, new_offset);
+        //     }
+        // }
+
+
+        // max offset of the beginning of the last matching variant line
+        // size_t end_variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_end_position());
+
+        std::string linebuf;
+        linebuf.reserve(4 * 1024); // 4 KiB
+        size_t linelength;
+        debugf("Starting linear variant enumeration from reference = %s %lu to %lu\n",
+                query.get_reference_name().c_str(),
+                query.get_start_position(),
+                query.get_end_position());
+
+        while (true) {
+            // Important
+            linebuf.clear();
+
+            uint64_t distance_to_previous, distance_to_next;
+            size_t line_start_offset = lseek(input_fd, 0, SEEK_CUR);
+            //input_fstream.read((char *)&distance_to_previous, 8);
+            //input_fstream.read((char *)&distance_to_next, 8);
+            // fread(&distance_to_previous, sizeof(uint64_t), 1, input_stream);
+            // fread(&distance_to_next, sizeof(uint64_t), 1, input_stream);
+            if (read(input_fd, &distance_to_previous, sizeof(uint64_t)) <= 0) {
+                throw std::runtime_error("couldn't read from file");
+            }
+            if (read(input_fd, &distance_to_next, sizeof(uint64_t)) <= 0) {
+                throw std::runtime_error("couldn't read from file");
+            }
+
+            debugf("distance_to_previous = %lu, distance_to_next = %lu\n", distance_to_previous, distance_to_next);
+
+            // Not positioned at a data line
+            if (distance_to_previous == 0 && distance_to_next == 0) {
+                throw std::runtime_error("No previous or next distance values");
+            }
+
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
+            decompress2_data_line_fd(input_fd, schema, linebuf, &linelength);
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("decompress2_data_line time: %lu\n", duration.count());
+            #endif
+
+            debugf("compressed bytes read: %lu\n", linelength);
+            // Update distance_to_next based on bytes already read from input stream
+            //distance_to_next += linelength + 16; // line length plus 2 uint64s at start
+            size_t bytes_read_so_far = ((size_t)lseek(input_fd, 0, SEEK_CUR) - line_start_offset);
+            distance_to_next -= bytes_read_so_far;
+            debugf("bytes_read_so_far = %lu, new distance_to_next = %lu\n", bytes_read_so_far, distance_to_next);
+
+            // time copy of linebuf
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
+            SplitIterator spi(linebuf, "\t");
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("SplitIterator.constructor time: %lu\n", duration.count());
+            #endif
+
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
+            std::string reference_name = spi.next();
+            std::string pos_str = spi.next();
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("SplitIterator.next time: %lu\n", duration.count());
+            #endif
+
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
+            char *endptr = NULL;
+            size_t pos = std::strtoul(pos_str.c_str(), &endptr, 10);
+            if (endptr != pos_str.data() + pos_str.size()) {
+                throw new std::runtime_error("Couldn't parse pos column: " + pos_str);
+            }
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("strtoul time: %lu\n", duration.count());
+            #endif
+
+            debugf("line reference_name = %s, pos = %lu; query reference_name = %s, end_position = %lu\n",
+                    reference_name.c_str(), pos,
+                    query.get_reference_name().c_str(), query.get_end_position());
+
+            if (reference_name == query.get_reference_name() && pos <= query.get_end_position()) {
+                // Meets filter criteria, print the line
+                //printf(linebuf.c_str());
+                fwrite(linebuf.c_str(), sizeof(char), linebuf.size(), stdout); // newline included already
+                // for (size_t i = 0; i < linebuf.length(); i++) {
+                //     printf("%c", linebuf[i]);
+                // }
+                //printf("\n");
+                debugf("Seeking ahead to next line\n");
+                #ifdef DEBUG
+                start = std::chrono::steady_clock::now();
+                #endif
+                lseek(input_fd, distance_to_next, SEEK_CUR);
+                #ifdef DEBUG
+                end = std::chrono::steady_clock::now();
+                duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+                debugf("fseek time: %lu\n", duration.count());
+                #endif
+
+                debugf("Now at address %lu\n", (size_t) lseek(input_fd, 0, SEEK_CUR));
+                continue;
+            } else {
+                break;
+            }
+        }
+
+    }
+    // No filter
+    else {
+        debugf("No filter criteria\n");
+        throw std::runtime_error("sparse query with no filter is not yet implemented\n");
+        uint8_t first_skip_bytes[8];
+        //input_fstream.read((char*)&first_skip_bytes, 8);
+        //fread(&first_skip_bytes, sizeof(uint8_t), 8, input_stream);
+        if (read(input_fd, &first_skip_bytes, 8*sizeof(uint8_t)) <= 0) {
+            throw std::runtime_error("Couldn't read from file");
+        }
+        uint64_t first_skip_count;
+        uint8_array_to_uint64(first_skip_bytes, &first_skip_count);
+        debugf("first_skip_count: %lu\n", first_skip_count);
+    }
+
+}
+
+void query_sparse_file_FILE(const std::string& input_filename, VcfCoordinateQuery query) {
+    //std::ifstream input_fstream(input_filename);
+    FILE *input_stream = fopen(input_filename.c_str(), "r");
+
+    VcfCompressionSchema schema;
+    debugf("Parsing metadata lines and header line\n");
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    #ifdef DEBUG
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    start = std::chrono::steady_clock::now();
+    #endif
+    decompress2_metadata_headers_FILE(input_stream, meta_header_lines, schema);
+    #ifdef DEBUG
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    debugf("decompress2_metadata_headers time: %lu\n", duration.count());
+    #endif
+
+    // Leave default sparse config
+    SparsificationConfiguration sparse_config;
+
+    long off = ftell(input_stream);
+    if (off < 0) {
+        throw std::runtime_error("ftell failed: " + std::to_string(off));
+    }
+    size_t data_start_offset = off + 8;
+
+    debugf("data_start_offset = %lu\n", data_start_offset);
+
+    // Single variant lookup
+    if (query.has_criteria() && (query.get_start_position() == query.get_end_position())) {
+        debugf("Single variant lookup\n");
+        size_t variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_start_position());
+
+        debugf("variant_offset = %lu, file_offset = %lu\n", variant_offset, data_start_offset + variant_offset);
+
+        //size_t current_offset = input_fstream.tellg();
+        fseek(input_stream, data_start_offset + variant_offset, SEEK_SET);
+
+        // skip over prev and next jump uint64 counts for single-variant query
+        fseek(input_stream, 16, SEEK_CUR);
+
+        std::string linebuf;
+        linebuf.reserve(8 * 1024); // 4 KiB
+        size_t linelength;
+        decompress2_data_line_FILE(input_stream, schema, linebuf, &linelength);
+        for (size_t i = 0; i < linebuf.length(); i++) {
+            printf("%c", linebuf[i]);
+        }
+        //printf("\n");
+    }
+    // Multi-variant lookup
+    else if (query.has_criteria() && (query.get_start_position() != query.get_end_position())) {
+        debugf("Multiple variant lookup\n");
+        size_t start_variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_start_position());
+
+        debugf("start of range: variant_offset = %lu, file_offset = %lu\n", start_variant_offset, data_start_offset + start_variant_offset);
+
+        // seek to start of range
+        fseek(input_stream, data_start_offset + start_variant_offset, SEEK_SET);
+
+        // max offset of the beginning of the last matching variant line
+        // size_t end_variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_end_position());
+
+        std::string linebuf;
+        linebuf.reserve(4 * 1024); // 4 KiB
+        size_t linelength;
+        debugf("Starting linear variant enumeration from reference = %s %lu to %lu\n",
+                query.get_reference_name().c_str(),
+                query.get_start_position(),
+                query.get_end_position());
+
+        while (true) {
+            // Important
+            linebuf.clear();
+
+            uint64_t distance_to_previous, distance_to_next;
+            size_t line_start_offset = ftell(input_stream);
+            //input_fstream.read((char *)&distance_to_previous, 8);
+            //input_fstream.read((char *)&distance_to_next, 8);
+            fread(&distance_to_previous, sizeof(uint64_t), 1, input_stream);
+            fread(&distance_to_next, sizeof(uint64_t), 1, input_stream);
+
+            debugf("distance_to_previous = %lu, distance_to_next = %lu\n", distance_to_previous, distance_to_next);
+
+            if (distance_to_previous == 0 && distance_to_next == 0) {
+                // Very unlikely, for now interpret as a hole in the file.
+                // A longer-term solution is to adapt decompress2_data_line to
+                // signal this situation
+
+                // Seek to the next byte after this one that is not sparse
+                long cur_offset = ftell(input_stream);
+                //int input_fd = fileno(input_stream);
+                fseek(input_stream, cur_offset, SEEK_DATA);
+                //lseek(input_fd, cur_offset, SEEK_DATA);
+                long new_offset = ftell(input_stream);
+                debugf("Position contained no data line, fseeked from %ld to %ld\n", cur_offset, new_offset);
+                continue;
+            }
+
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
+            decompress2_data_line_FILE(input_stream, schema, linebuf, &linelength);
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("decompress2_data_line time: %lu\n", duration.count());
+            #endif
+
+            debugf("compressed bytes read: %lu\n", linelength);
+            // Update distance_to_next based on bytes already read from input stream
+            //distance_to_next += linelength + 16; // line length plus 2 uint64s at start
+            size_t bytes_read_so_far = ((size_t)ftell(input_stream) - line_start_offset);
+            distance_to_next -= bytes_read_so_far;
+            debugf("bytes_read_so_far = %lu, new distance_to_next = %lu\n", bytes_read_so_far, distance_to_next);
+
+            // time copy of linebuf
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
+            SplitIterator spi(linebuf, "\t");
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("SplitIterator.constructor time: %lu\n", duration.count());
+            #endif
+
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
+            std::string reference_name = spi.next();
+            std::string pos_str = spi.next();
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("SplitIterator.next time: %lu\n", duration.count());
+            #endif
+
+            #ifdef DEBUG
+            start = std::chrono::steady_clock::now();
+            #endif
+            char *endptr = NULL;
+            size_t pos = std::strtoul(pos_str.c_str(), &endptr, 10);
+            if (endptr != pos_str.data() + pos_str.size()) {
+                throw new std::runtime_error("Couldn't parse pos column: " + pos_str);
+            }
+            #ifdef DEBUG
+            end = std::chrono::steady_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            debugf("strtoul time: %lu\n", duration.count());
+            #endif
+
+            debugf("line reference_name = %s, pos = %lu; query reference_name = %s, end_position = %lu\n",
+                    reference_name.c_str(), pos,
+                    query.get_reference_name().c_str(), query.get_end_position());
+
+            if (reference_name == query.get_reference_name() && pos <= query.get_end_position()) {
+                // Meets filter criteria, print the line
+                //printf(linebuf.c_str());
+                fwrite(linebuf.c_str(), sizeof(char), linebuf.size(), stdout); // newline included already
+                // for (size_t i = 0; i < linebuf.length(); i++) {
+                //     printf("%c", linebuf[i]);
+                // }
+                //printf("\n");
+                debugf("Seeking ahead to next line\n");
+                #ifdef DEBUG
+                start = std::chrono::steady_clock::now();
+                #endif
+                fseek(input_stream, distance_to_next, SEEK_CUR);
+                #ifdef DEBUG
+                end = std::chrono::steady_clock::now();
+                duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+                debugf("fseek time: %lu\n", duration.count());
+                #endif
+
+                debugf("Now at address %lu\n", (size_t) ftell(input_stream));
+                continue;
+            } else {
+                break;
+            }
+        }
+
+    }
+    // No filter
+    else {
+        debugf("No filter criteria\n");
+        throw std::runtime_error("sparse query with no filter is not yet implemented\n");
+        uint8_t first_skip_bytes[8];
+        //input_fstream.read((char*)&first_skip_bytes, 8);
+        fread(&first_skip_bytes, sizeof(uint8_t), 8, input_stream);
+        uint64_t first_skip_count;
+        uint8_array_to_uint64(first_skip_bytes, &first_skip_count);
+        debugf("first_skip_count: %lu\n", first_skip_count);
+    }
+
+}
 
 void query_sparse_file(const std::string& input_filename, VcfCoordinateQuery query) {
     std::ifstream input_fstream(input_filename);
@@ -1332,9 +2587,13 @@ void sparsify_file(const std::string& compressed_input_filename, const std::stri
         debugf("variant_offset = %lu, file_offset = %lu\n", variant_offset, file_offset);
 
         // Store uint64 number bytes back to previous line start
-        uint32_t count_to_prev = file_offset - previous_offset;
+        uint64_t count_to_prev = file_offset - previous_offset;
+        debugf("Updating line_bytes distance_to_previous = %lu\n", count_to_prev);
         uint8_t offset_bytes[8];
         uint64_to_uint8_array(count_to_prev, offset_bytes);
+        for (int offi = 0; offi < 8; offi++) {
+            debugf("offset_bytes[%d] = %u\n", offi, offset_bytes[offi]);
+        }
         for (int offi = 0; offi < 8; offi++) {
             line_bytes[offi] = offset_bytes[offi];
         }
@@ -1347,7 +2606,8 @@ void sparsify_file(const std::string& compressed_input_filename, const std::stri
             // Write out the first count representing the number of bytes from the start of variant data
             // to the start of the first line. Reader should skip ahead this many bytes.
             output_fstream.seekp(data_start_offset - 8);
-            debugf("Writing first skip uint64_t length: %lu\n", variant_offset);
+            debugf("Writing first skip uint64_t length: %lu to file address: %lu\n",
+                variant_offset, data_start_offset - 8);
             output_fstream.write((const char*)&variant_offset, 8);
 
             is_first_line = false;
@@ -1590,12 +2850,8 @@ void gap_analysis(const std::string& input_filename) {
 
 
 int main(int argc, char **argv) {
-    // if (argc < 4) {
-    //     return usage();
-    // }
-
     // Not using stdio FILE functions, so disable sync
-    std::ios_base::sync_with_stdio(false);
+    //std::ios_base::sync_with_stdio(false);
 
     int status;
     std::string action(argv[1]);
@@ -1663,7 +2919,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         VcfCoordinateQuery query(reference_name, start_position, end_position);
-        query_sparse_file(input_filename, query);
+        query_sparse_file_fd(input_filename, query);
 
     }
     else {

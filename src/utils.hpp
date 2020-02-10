@@ -11,7 +11,7 @@ typedef uint8_t byte_t;
 //#define DEBUG
 #ifdef DEBUG
     #define debug(s) fputs(s.c_str(), stderr)
-    #define debugf(...) fprintf(stderr, __VA_ARGS__)
+    #define debugf(...) fprintf(stdout, __VA_ARGS__)
 #else
     #define debug(s) {}
     #define debugf(...) {}
@@ -168,13 +168,13 @@ void uint64_to_uint8_array(uint64_t val, uint8_t bytes[8]) {
     //uint8_t *bytes = new uint8_t[8];
     uint64_t FF_low = 0x00000000000000FF;
     bytes[0] = (val >> 56) & (FF_low << 0);
-    bytes[1] = (val >> 48) & (FF_low << 8);
-    bytes[2] = (val >> 40) & (FF_low << 16);
-    bytes[3] = (val >> 32) & (FF_low << 24);
-    bytes[4] = (val >> 24) & (FF_low << 32);
-    bytes[5] = (val >> 16) & (FF_low << 40);
-    bytes[6] = (val >> 8)  & (FF_low << 48);
-    bytes[7] = (val >> 0)  & (FF_low << 56);
+    bytes[1] = (val >> 48) & (FF_low << 0);
+    bytes[2] = (val >> 40) & (FF_low << 0);
+    bytes[3] = (val >> 32) & (FF_low << 0);
+    bytes[4] = (val >> 24) & (FF_low << 0);
+    bytes[5] = (val >> 16) & (FF_low << 0);
+    bytes[6] = (val >> 8)  & (FF_low << 0);
+    bytes[7] = (val >> 0)  & (FF_low << 0);
     //return bytes;
 }
 
