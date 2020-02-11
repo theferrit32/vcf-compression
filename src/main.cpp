@@ -564,6 +564,10 @@ int peek(FILE *stream) {
     return c;
 }
 
+long tellfd(int fd) {
+    return lseek(fd, 0, SEEK_CUR);
+}
+
 int decompress2_data_line(
         std::ifstream& input_fstream,
         const VcfCompressionSchema& schema,
@@ -1796,19 +1800,44 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
         debugf("variant_offset = %lu, file_offset = %lu\n", variant_offset, data_start_offset + variant_offset);
 
         //size_t current_offset = input_fstream.tellg();
-        lseek(input_fd, data_start_offset + variant_offset, SEEK_SET);
+        long initial_lookup_offset = lseek(input_fd, data_start_offset + variant_offset, SEEK_SET);
 
-        // skip over prev and next jump uint64 counts for single-variant query
-        lseek(input_fd, 16, SEEK_CUR);
-
-        std::string linebuf;
-        linebuf.reserve(4 * 1024); // 4 KiB
-        size_t linelength;
-        decompress2_data_line_fd(input_fd, schema, linebuf, &linelength);
-        for (size_t i = 0; i < linebuf.length(); i++) {
-            printf("%c", linebuf[i]);
+        union {
+            struct {
+                uint64_t distance_to_previous;
+                uint64_t distance_to_next;
+            } lengths;
+            uint8_t bytes[16];
+        } _length_headers;
+        if (read(input_fd, &_length_headers.bytes, 16) == 0) {
+            throw std::runtime_error("Reached end of file unexpectedly");
         }
-        //printf("\n");
+        debugf("distance_to_previous = %lu, distance_to_next = %lu\n",
+            _length_headers.lengths.distance_to_previous, _length_headers.lengths.distance_to_next);
+
+        // IF prev offset value is zero and this is not the first line, must be an invalid location
+        if (_length_headers.lengths.distance_to_previous == 0 &&
+                initial_lookup_offset != (long)(first_line_offset + data_start_offset)) {
+            // seek ahead to next viable line start
+            long seek_distance = sparse_config.multiplication_factor * sparse_config.block_size;
+            seek_distance -= 16; // Already read this many bytes
+            long new_offset = lseek(input_fd, seek_distance, SEEK_CUR);
+            debugf("Offset %ld was not a data line for single variant lookup, output no data\n",
+                new_offset + 16 - seek_distance, new_offset);
+
+        } else {
+            debugf("Found requested single variant line\n");
+            // skip over prev and next jump uint64 counts for single-variant query
+            // lseek(input_fd, 16, SEEK_CUR);
+            std::string linebuf;
+            linebuf.reserve(4 * 1024); // 4 KiB
+            size_t linelength;
+            decompress2_data_line_fd(input_fd, schema, linebuf, &linelength);
+            for (size_t i = 0; i < linebuf.length(); i++) {
+                printf("%c", linebuf[i]);
+            }
+            //printf("\n");
+        }
     }
     // Multi-variant lookup
     else if (query.has_criteria() && (query.get_start_position() != query.get_end_position())) {
@@ -1833,9 +1862,14 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
             if ((initial_seek_data - data_start_offset) % viable_line_offset_modulo != 0) {
                 // go backwards to previous viable start offset
                 long previous_viable_line_distance = (initial_seek_data - data_start_offset) % viable_line_offset_modulo;
+                long next_viable_line_distance = viable_line_offset_modulo - ((initial_seek_data - data_start_offset) % viable_line_offset_modulo);
                 //previous_viable_line_distance += data_start_offset;
-                lseek(input_fd, -previous_viable_line_distance, SEEK_CUR);
-                debugf("Seeked backwards previous_viable_line_distance = %ld\n", previous_viable_line_distance);
+
+                // lseek(input_fd, -previous_viable_line_distance, SEEK_CUR);
+                // debugf("Seeked backwards previous_viable_line_distance = %ld\n", previous_viable_line_distance);
+
+                lseek(input_fd, next_viable_line_distance, SEEK_CUR);
+                debugf("Seeked forwards next_viable_line_distance = %ld\n", next_viable_line_distance);
             }
         }
 
@@ -1857,7 +1891,7 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
 
             // IF prev offset value is zero and this is not the first line, must be an invalid location
             if (_length_headers.lengths.distance_to_previous == 0 &&
-                    initial_lookup_offset != first_line_offset + data_start_offset) {
+                    initial_lookup_offset != (long)(first_line_offset + data_start_offset)) {
                 // seek ahead to next viable line start
                 long seek_distance = sparse_config.multiplication_factor * sparse_config.block_size;
                 seek_distance -= 16; // Already read this many bytes
@@ -1870,44 +1904,6 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
                 break;
             }
         }
-
-        // uint64_t distance_to_previous, distance_to_next;
-        // size_t line_start_offset = lseek(input_fd, 0, SEEK_CUR);
-        // //input_fstream.read((char *)&distance_to_previous, 8);
-        // //input_fstream.read((char *)&distance_to_next, 8);
-        // // fread(&distance_to_previous, sizeof(uint64_t), 1, input_stream);
-        // // fread(&distance_to_next, sizeof(uint64_t), 1, input_stream);
-        // if (read(input_fd, &distance_to_previous, sizeof(uint64_t)) <= 0) {
-        //     throw std::runtime_error("couldn't read from file");
-        // }
-        // if (read(input_fd, &distance_to_next, sizeof(uint64_t)) <= 0) {
-        //     throw std::runtime_error("couldn't read from file");
-        // }
-
-        // debugf("distance_to_previous = %lu, distance_to_next = %lu\n", distance_to_previous, distance_to_next);
-
-        // // Not positioned at a data line
-        // if (distance_to_previous == 0 && distance_to_next == 0) {
-        //     // For now interpret as a hole in the file, which is almost certainly the case.
-        //     // A longer-term solution is to adapt decompress2_data_line to
-        //     // signal this situation
-
-        //     // Seek to the next byte after this one that is not sparse
-        //     long cur_offset = lseek(input_fd, 0, SEEK_CUR);
-
-        //     long new_offset = lseek(input_fd, cur_offset, SEEK_DATA);
-
-        //     if (new_offset == cur_offset) {
-        //         debugf("SEEK_DATA did not move from %ld\n", cur_offset);
-        //         // Calculate the next possible start location for a line
-        //         long seek_distance = sparse_config.block_size * sparse_config.multiplication_factor;
-        //         new_offset = lseek(input_fd, line_start_offset + seek_distance, SEEK_SET);
-        //         debugf("Manually seeked from %ld to %ld\n", cur_offset, new_offset);
-        //     } else {
-        //         debugf("Position contained no data, SEEK_DATA from %ld to %ld\n", cur_offset, new_offset);
-        //     }
-        // }
-
 
         // max offset of the beginning of the last matching variant line
         // size_t end_variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_end_position());
@@ -1943,10 +1939,15 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
             if (distance_to_previous == 0 && distance_to_next == 0) {
                 throw std::runtime_error("No previous or next distance values");
             }
+            bool end_of_reference = false;
+            if (distance_to_next == 0) {
+                end_of_reference = true;
+            }
 
             #ifdef DEBUG
             start = std::chrono::steady_clock::now();
             #endif
+            debugf("current offset: %ld\n", lseek(input_fd, 0, SEEK_CUR));
             decompress2_data_line_fd(input_fd, schema, linebuf, &linelength);
             #ifdef DEBUG
             end = std::chrono::steady_clock::now();
@@ -2009,19 +2010,35 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
                 //     printf("%c", linebuf[i]);
                 // }
                 //printf("\n");
-                debugf("Seeking ahead to next line\n");
-                #ifdef DEBUG
-                start = std::chrono::steady_clock::now();
-                #endif
-                lseek(input_fd, distance_to_next, SEEK_CUR);
-                #ifdef DEBUG
-                end = std::chrono::steady_clock::now();
-                duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-                debugf("fseek time: %lu\n", duration.count());
-                #endif
 
-                debugf("Now at address %lu\n", (size_t) lseek(input_fd, 0, SEEK_CUR));
-                continue;
+                if (end_of_reference) {
+                    debugf("Reached end of reference %s\n", query.get_reference_name().c_str());
+                    break;
+                } else if (pos >= query.get_end_position()) {
+                    debugf("Reached end of query range %lu\n", query.get_end_position());
+                    break;
+                } else {
+                    debugf("Seeking ahead to next line\n");
+                    #ifdef DEBUG
+                    start = std::chrono::steady_clock::now();
+                    #endif
+                    long current_offset = tellfd(input_fd);
+                    long new_offset = lseek(input_fd, distance_to_next, SEEK_CUR);
+                    #ifdef DEBUG
+                    end = std::chrono::steady_clock::now();
+                    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+                    debugf("lseek time: %lu\n", duration.count());
+                    #endif
+
+                    debugf("Previously at address: %ld, now at address: %ld\n", current_offset, new_offset);
+                }
+
+                // if (pos >= query.get_end_position()) {
+                //     // reached last element in range
+                //     break;
+                // } else {
+                //     continue;
+                // }
             } else {
                 break;
             }
