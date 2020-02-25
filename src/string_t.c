@@ -56,6 +56,7 @@ int string_appendc(string_t *str, char c) {
         str->capacity = new_cap;
     }
     str->buf[str->size++] = c;
+    str->buf[str->size] = 0x0;
     return 0;
 }
 
@@ -89,6 +90,7 @@ char string_pop(string_t *str) {
 }
 
 void string_clear(string_t *str) {
-    memset(str->buf, 0, str->capacity);
+    // memset(str->buf, 0, str->size);
     str->size = 0;
+    str->buf[0] = 0x0;
 }

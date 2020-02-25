@@ -1,10 +1,15 @@
+#pragma once
 #ifndef _UTILS_H
 #define _UTILS_H
+
 #include <vector>
 #include <string>
+#include <map>
 #include <sstream>
 #include <stdarg.h>
 #include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 typedef uint8_t byte_t;
 
@@ -16,6 +21,53 @@ typedef uint8_t byte_t;
     #define debug(s) {}
     #define debugf(...) {}
 #endif
+
+
+#define DEFAULT_FILE_CREATE_MODE (S_IRUSR | S_IWUSR)
+
+// regex submatch flag to match everything not in the pattern
+#define REGEX_SELECT_NOTMATCH -1
+// VCF file format 4.2, 4.3 require 8 tab-separated columns at start of row
+// followed by a variable number of columns depending on sample count
+#define VCF_REQUIRED_COL_COUNT 8
+
+////////////////////////////////////////////////////////////////
+// Byte packing masks and flag values
+//
+// All uncompressed VCF input bytes are ASCII, all leading bits are 0
+// so we can use the value of the first bit as a flag.
+// If first bit is zero, we know it is compressed and a 0|0 genotype
+#define SAMPLE_MASK_00              0b10000000
+#define SAMPLE_MASKED_00            0b00000000
+// If first bit is a 1, the first 3 bits are reserved for genotype flag
+#define SAMPLE_MASK_01_10_11        0b11100000
+#define SAMPLE_MASKED_01            0b10100000
+#define SAMPLE_MASKED_10            0b11000000
+#define SAMPLE_MASKED_11            0b10000000
+// If first bit is a 1 and the first 3 bits are 111, this column is uncompressed
+// and this byte is entirely a flag. Everything from the next byte to the next tab
+// is the column value.
+#define SAMPLE_MASK_UNCOMPRESSED    0b11100000
+#define SAMPLE_MASKED_UNCOMPRESSED  0b11100000
+// the value of the remaining 5 bits in the 0b111 case are unused
+////////////////////////////////////////////////////////////////
+
+extern const char *tab;
+extern const size_t tab_len;
+extern const std::string GT_00;
+extern const std::string GT_01;
+extern const std::string GT_10;
+extern const std::string GT_11;
+extern const int eof;
+
+// const char *tab = "\t";
+// const int tab_len = 1;
+// const std::string GT_00("0|0");
+// const std::string GT_01("0|1");
+// const std::string GT_10("1|0");
+// const std::string GT_11("1|1");
+// const int eof = std::char_traits<char>::eof();
+
 
 // std::vector<std::string> split_string_regex(const std::string& s, const std::string& regex_str) {
 //     //debugf("splitting string [%s] by delim [%s]\n", s.c_str(), regex_str.c_str());
@@ -31,165 +83,165 @@ typedef uint8_t byte_t;
 //     return v;
 // }
 
+typedef struct {
+    byte_t  *bytes;
+    size_t len;
+} byte_array;
 
+std::string char_to_bin_string(const char c_input);
+std::string string_to_bin_string(const std::string& str);
+std::string string_format(const char* format, ...);
+// Provides istream::peek function for C FILEs
+int peek(FILE *stream);
+long tellfd(int fd);
 
-std::string char_to_bin_string(const char c_input) {
-    std::string output;
-    const uint8_t c = reinterpret_cast<const uint8_t&>(c_input);
-    for (size_t i = 0; i < 8; i++) {
-        uint8_t mask = 0x1 << (7-i);
-        //debugf("mask = %02X\n", mask);
-        uint8_t bit = (c & mask);
-        if (bit) {
-            output += "1";
-        } else {
-            output += "0";
+class VcfValidationError : public std::runtime_error {
+public:
+    VcfValidationError()
+        : runtime_error("VCF Validation Error"){};
+    VcfValidationError(const char *message)
+        : runtime_error(message){};
+};
+
+class VcfCompressionSchema {
+public:
+    VcfCompressionSchema(){};
+    size_t alt_allele_count = 0;
+    size_t sample_count = 0;
+    std::map<std::string,byte_array> sequence_map;
+};
+
+#define LINE_LENGTH_HEADER_MAX_EXTENSION 3
+class LineLengthHeader {
+public:
+    LineLengthHeader() {}
+
+    void set_extension_count(uint8_t count) {
+        if (count > LINE_LENGTH_HEADER_MAX_EXTENSION) {
+            throw std::runtime_error(string_format(
+                "Count exceeded max allowed %d: %d",
+                LINE_LENGTH_HEADER_MAX_EXTENSION, count));
         }
-    }
-    //debugf("%s input %02X output %s\n", __FUNCTION__, c, output.c_str());
-    return output;
-}
-
-std::string string_to_bin_string(const std::string& str) {
-    std::string output;
-    for (size_t i = 0; i < str.size(); i++) {
-        output += char_to_bin_string(str[i]);
-    }
-    return output;
-}
-
-
-std::vector<std::string> split_string(const std::string& s, const std::string& delim, int max_split) {
-    std::vector<std::string> v;
-    size_t idx = 0;
-    size_t search_idx = 0;
-    int split_count = 0;
-    // loop through the delimiter instances
-    while ((idx = s.find(delim, search_idx)) != std::string::npos) {
-        if (max_split > 0 && (split_count >= max_split)) {
-            break;
+        if (count != 3) {
+            throw std::runtime_error(string_format(
+                "Extension count %d not implemented, must be 3",
+                count));
         }
-        //debugf("idx: %ld, prev_idx: %ld\n", idx, search_idx);
-        std::string term = s.substr(search_idx, (idx - search_idx));
-        //debugf("Found term: %s\n", term.c_str());
-        if (term.size() > 0) {
-            v.push_back(term);
-            split_count++;
+        this->extension_count = count;
+    }
+
+    void set_length(uint32_t length) {
+        #define LINE_LENGTH_HEADER_MAX_VALUE (uint32_t)0x3FFFFFFF
+        if (length > LINE_LENGTH_HEADER_MAX_VALUE) {
+            throw std::runtime_error(string_format(
+                "Length exceeded max allowed %d: %d",
+                LINE_LENGTH_HEADER_MAX_VALUE));
         }
-        // set next search index to be after the current delimiter
-        search_idx = idx + delim.size();
+        this->length_bytes[0] = (length >> 24) & 0xFF;
+        this->length_bytes[1] = (length >> 16) & 0xFF;
+        this->length_bytes[2] = (length >> 8) & 0xFF;
+        this->length_bytes[3] = (length >> 0) & 0xFF;
+        this->length = length;
+        debugf("%s %u extension_count = %u, length = %u, bytes %02X %02X %02X %02X, bin = %s\n",
+            __FUNCTION__, length,
+            this->extension_count, this->length,
+            this->length_bytes[0],
+            this->length_bytes[1],
+            this->length_bytes[2],
+            this->length_bytes[3],
+            string_to_bin_string(std::to_string(this->length)).c_str()
+        );
     }
-    if (search_idx < s.size()) {
-        if (max_split < 0 || (split_count < max_split)) {
-            // leftover term after last delimiter
-            std::string term = s.substr(search_idx, (s.size() - search_idx));
-            //debugf("Adding trailing split term: %s\n", term.c_str());
-            v.push_back(term);
+
+    void serialize(uint8_t out[4]) {
+        out[0] = this->extension_count | this->length_bytes[0];
+        out[1] = this->length_bytes[1];
+        out[2] = this->length_bytes[2];
+        out[3] = this->length_bytes[3];
+        debugf("%s %02X %02X %02X %02X extension_count = %u, length = %u, bytes %02X %02X %02X %02X, bin = %s\n",
+            __FUNCTION__, out[0], out[1], out[2], out[3],
+            this->extension_count, this->length,
+            this->length_bytes[0],
+            this->length_bytes[1],
+            this->length_bytes[2],
+            this->length_bytes[3],
+            string_to_bin_string(std::to_string(this->length)).c_str()
+        );
+    }
+
+    void deserialize(uint8_t in[4]) {
+        debugf("%s input bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n", __FUNCTION__, in[0], in[1], in[2], in[3]);
+        this->extension_count = (in[0] >> 6) & 0x03;
+        if (this->extension_count != 3) {
+            debugf("Error in deserialize, extension count was %d\n", this->extension_count);
+            throw std::runtime_error(string_format(
+                "Extension count %d not implemented, must be 3",
+                this->extension_count));
         }
+
+        this->length_bytes[0] = in[0] & 0x3F; // 00111111
+        this->length_bytes[1] = in[1];
+        this->length_bytes[2] = in[2];
+        this->length_bytes[3] = in[3];
+
+        // this->length = (this->length_bytes[0] << 24) & (0xFF << 24);
+        // debugf("length = 0x%08X ", length);
+        // this->length |= (this->length_bytes[1] << 16) & (0xFF << 16);
+        // debugf("length = 0x%08X ", length);
+        // this->length |= (this->length_bytes[2] << 8) & (0xFF << 8);
+        // debugf("length = 0x%08X ", length);
+        // this->length |= (this->length_bytes[3] << 0) & (0xFF << 0);
+        // debugf("length = 0x%08X ", length);
+        // debugf("\n");
+
+        this->length =
+            ((this->length_bytes[0] << 24) /*& (0xFF << 24)*/)
+            | ((this->length_bytes[1] << 16) /*& (0xFF << 16)*/)
+            | ((this->length_bytes[2] << 8) /*& (0xFF << 8)*/)
+            | ((this->length_bytes[3] << 0) /*& (0xFF << 0)*/);
+        debugf("length = %u, 0x%08X\n", length, length);
+
+        // debugf("%s %02X %02X %02X %02X extension_count = %u, length = %u, bytes %02X %02X %02X %02X, bin = %s\n",
+        //     __FUNCTION__, in[0], in[1], in[2], in[3],
+        //     this->extension_count, this->length,
+        //     this->length_bytes[0],
+        //     this->length_bytes[1],
+        //     this->length_bytes[2],
+        //     this->length_bytes[3],
+        //     string_to_bin_string(std::to_string(this->length)).c_str()
+        // );
     }
-    //debugf("search_idx: %ld, s.size: %ld\n", search_idx, s.size());
-    return v;
-}
 
-std::vector<std::string> split_string(const std::string& s, const std::string& delim) {
-    return split_string(s, delim, -1);
-}
+    uint8_t extension_count;
+    // Important, this assumes little-endian integer layout
+    //union {
+        uint32_t length;
+        uint8_t length_bytes[LINE_LENGTH_HEADER_MAX_EXTENSION+1]; // 4
+    //};
+};
 
-std::string string_format(const char* format, ...) {
-    char *buf = NULL;
-    va_list va;
-    va_start(va, format);
 
-    int buflen = vsnprintf(buf, 0, format, va);
-    va_end(va);
-    buflen++; // for '\0'
-    buf = (char*) calloc(buflen, sizeof(char));
+std::vector<std::string> split_string(const std::string& s, const std::string& delim, int max_split);
+std::vector<std::string> split_string(const std::string& s, const std::string& delim);
+std::string vector_join(std::vector<std::string>& v, std::string delim);
 
-    va_start(va, format);
-    vsnprintf(buf, buflen, format, va);
-    va_end(va);
+void push_string_to_byte_vector(std::vector<byte_t>& v, const std::string& s);
+std::string byte_vector_to_string(const std::vector<byte_t>& v);
+uint64_t str_to_uint64(const std::string& s, bool& success);
 
-    std::string buf_string(buf);
-    free(buf);
-    return buf_string;
-}
+void uint64_to_uint8_array(uint64_t val, uint8_t bytes[8]);
+void uint8_array_to_uint64(uint8_t bytes[8], uint64_t *val);
 
-std::string vector_join(std::vector<std::string>& v, std::string delim) {
-    std::ostringstream ss;
-    bool first = true;
-    for (auto iter = v.begin(); iter != v.end(); iter++) {
-        if (!first) {
-            ss << delim;
-        } else {
-            first = false;
-        }
-        ss << *iter;
-    }
-    return ss.str();
-}
-
-void push_string_to_byte_vector(std::vector<byte_t>& v, const std::string& s) {
-    for (size_t i = 0; i < s.size(); i++) {
-        v.push_back((byte_t) s.at(i));
-    }
-}
-
-std::string byte_vector_to_string(const std::vector<byte_t>& v) {
-    std::ostringstream os;
-    bool first = true;
-    for (size_t vi = 0; vi < v.size(); vi++) {
-        if (!first) {
-            os << " ";
-        }
-        first = false;
-        std::string byte_str = string_format("%02X", v[vi]);
-        os << byte_str.c_str();
-    }
-    return os.str();
-}
-
-uint64_t str_to_uint64(const std::string& s, bool& success) {
-    //char *buf = (char*) calloc(s.size() + 1, sizeof(char));
-    //memcpy(buf, s.c_str(), s.size());
-    char *endptr = NULL;
-    long val = std::strtoul(s.c_str(), &endptr, 10);
-    if (endptr != (s.c_str() + s.size())) {
-        //free(buf);
-        success = false;
-        return 0;
-    }
-    //free(buf);
-    success = true;
-    return val;
-}
-
-// Return value must be deleted by caller
-void uint64_to_uint8_array(uint64_t val, uint8_t bytes[8]) {
-    //uint8_t *bytes = new uint8_t[8];
-    uint64_t FF_low = 0x00000000000000FF;
-    bytes[0] = (val >> 56) & (FF_low << 0);
-    bytes[1] = (val >> 48) & (FF_low << 0);
-    bytes[2] = (val >> 40) & (FF_low << 0);
-    bytes[3] = (val >> 32) & (FF_low << 0);
-    bytes[4] = (val >> 24) & (FF_low << 0);
-    bytes[5] = (val >> 16) & (FF_low << 0);
-    bytes[6] = (val >> 8)  & (FF_low << 0);
-    bytes[7] = (val >> 0)  & (FF_low << 0);
-    //return bytes;
-}
-
-void uint8_array_to_uint64(uint8_t bytes[8], uint64_t *val) {
-    uint64_t zero64 = 0x0000000000000000;
-    uint64_t FF_low = 0x00000000000000FF;
-    *val =
-        (((bytes[0] | zero64) << 56) & (FF_low << 56)) |
-        (((bytes[1] | zero64) << 48) & (FF_low << 48)) |
-        (((bytes[2] | zero64) << 40) & (FF_low << 40)) |
-        (((bytes[3] | zero64) << 32) & (FF_low << 32)) |
-        (((bytes[4] | zero64) << 24) & (FF_low << 24)) |
-        (((bytes[5] | zero64) << 16) & (FF_low << 16)) |
-        (((bytes[6] | zero64) << 8)  & (FF_low << 8))  |
-        (((bytes[7] | zero64) << 0)  & (FF_low << 0));
-}
+/**
+ * This should be avoided as much as possible as it involves a seek back,
+ * which depending on underlying kernel and hardware could be expensive if
+ * done frequently.
+ *
+ * Returns the return from read(). Negative on error, zero on EOF, 1 on success.
+ */
+int peekfd(int fd, unsigned char *c);
+bool eof_fd(int fd);
+// Provides istream::peek function for C FILEs
+int peek_FILE(FILE *stream);
 
 #endif
