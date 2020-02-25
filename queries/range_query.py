@@ -76,7 +76,7 @@ def measure():
         proc.wait()
         duration = round(time.time() - start_time, 6)
         sparse_values_from_mid.append((start_pos, end_pos, duration))
-    data['sparse_values_from_mid']
+    data['sparse_values_from_mid'] = sparse_values_from_mid
 
 
     # Tabix+BGZIP measurements
@@ -131,7 +131,7 @@ def measure():
         proc.wait()
         duration = round(time.time() - start_time, 6)
         tabix_bgzip_values_from_mid.append((start_pos, end_pos, duration))
-    data['tabix_bgzip_values_from_mid']
+    data['tabix_bgzip_values_from_mid'] = tabix_bgzip_values_from_mid
 
 
     return data
@@ -162,13 +162,27 @@ def graph(measurements):
             tabix_bgzip_values_from_back_x.append(val[1] - val[0])
             tabix_bgzip_values_from_back_y.append(val[2])
 
+        sparse_values_from_mid_x = []
+        sparse_values_from_mid_y = []
+        for val in measurements['sparse_values_from_mid']:
+            sparse_values_from_mid_x.append(val[1] - val[0])
+            sparse_values_from_mid_y.append(val[2])
+
+        tabix_bgzip_values_from_mid_x = []
+        tabix_bgzip_values_from_mid_y = []
+        for val in measurements['tabix_bgzip_values_from_mid']:
+            tabix_bgzip_values_from_mid_x.append(val[1] - val[0])
+            tabix_bgzip_values_from_mid_y.append(val[2])
+
     plt.xlabel('Query Range')
     plt.ylabel('Time (seconds)')
     plt.plot(sparse_values_from_front_x, sparse_values_from_front_y, label='VCFC Sparse Offset Index (from start of file)')
-    plt.plot(tabix_bgzip_values_from_front_x, tabix_bgzip_values_from_front_y, label='BGZIP+Tabix Index (from start of file)')
-
     plt.plot(sparse_values_from_back_x, sparse_values_from_back_y, label='VCFC Sparse Offset Index (from end of file)')
+    plt.plot(sparse_values_from_mid_x, sparse_values_from_mid_y, label='VCFC Sparse Offset Index (from mid of file)')
+
+    plt.plot(tabix_bgzip_values_from_front_x, tabix_bgzip_values_from_front_y, label='BGZIP+Tabix Index (from start of file)')
     plt.plot(tabix_bgzip_values_from_back_x, tabix_bgzip_values_from_back_y, label='BGZIP+Tabix Index (from end of file)')
+    plt.plot(tabix_bgzip_values_from_mid_x, tabix_bgzip_values_from_mid_y, label='BGZIP+Tabix Index (from mid of file)')
 
     plt.legend()
     plt.show()
