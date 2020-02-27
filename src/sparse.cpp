@@ -1,23 +1,21 @@
 #include "sparse.hpp"
 
-SparsificationConfiguration::SparsificationConfiguration() {
-    uint8_t ref_map_val = 1; // counter val for ref -> int map
-    for (size_t ref_idx = 0; ref_idx < references.size(); ref_idx++) {
-        n_map[references[ref_idx]] = ref_map_val++;
-    }
-}
+SparsificationConfiguration::SparsificationConfiguration() {}
 
 size_t SparsificationConfiguration::compute_sparse_offset(
         const std::string& reference_name,
         size_t pos) {
-    size_t block_offset = this->block_size * this->n_map[reference_name] * this->max_position;
+    size_t block_offset =
+        this->block_size
+        * this->name_map.reference_to_int(reference_name)
+        *  this->max_position;
     size_t in_block_offset =  pos * (this->multiplication_factor * this->block_size);
     size_t offset = block_offset + in_block_offset;
     return offset;
 }
 
-uint8_t SparsificationConfiguration::reference_to_int(std::string reference_name) {
-    return this->n_map[reference_name];
+uint8_t SparsificationConfiguration::reference_to_int(const std::string& reference_name) {
+    return name_map.reference_to_int(reference_name);
 }
 
 
@@ -136,10 +134,15 @@ void sparsify_file_fd(const std::string& compressed_input_filename, const std::s
 
         // keep track of some column values as we go across, for offset calculation
         bool got_reference_name = false;
-        std::string reference_name;
+        // std::string reference_name;
+        string_t reference_name;
+        string_reserve(&reference_name, 32);
 
         bool got_pos = false;
-        std::string pos_str;
+        // std::string pos_str;
+        string_t pos_str;
+        string_reserve(&pos_str, 32);
+
         size_t pos = 0;
 
         // iterate over the rest of the line
@@ -155,29 +158,39 @@ void sparsify_file_fd(const std::string& compressed_input_filename, const std::s
             line_bytes.push_back(b);
 
             if (!got_reference_name) {
-                if (line_bytes.back() != '\t') {
-                    reference_name += line_bytes.back();
+                if (b != '\t') {
+                    // reference_name += b;
+                    string_appendc(&reference_name, b);
                 } else {
-                    if (reference_name.size() == 0) {
+                    // if (reference_name.size() == 0) {
+                    if (reference_name.size == 0) {
                         throw std::runtime_error("Line did not contain a reference name");
                     } else {
-                        debugf("Got reference name: %s\n", reference_name.c_str());
+                        // debugf("Got reference name: %s\n", reference_name.c_str());
+                        debugf("Got reference name: %s\n", reference_name.buf);
                         got_reference_name = true;
                     }
                 }
             } else if (!got_pos) {
-                if (line_bytes.back() != '\t') {
-                    pos_str += line_bytes.back();
+                if (b != '\t') {
+                    // pos_str += b;
+                    string_appendc(&pos_str, b);
                 } else {
-                    if (pos_str.size() == 0) {
+                    // if (pos_str.size() == 0) {
+                    if (pos_str.size == 0) {
                         throw std::runtime_error("Line did not contain a position value");
                     } else {
-                        debugf("Got position: %s\n", pos_str.c_str());
+                        debugf("Got position: %s\n", pos_str.buf);
                         got_pos = true;
                         char *endptr = NULL;
-                        pos = std::strtoul(pos_str.c_str(), &endptr, 10);
-                        if (endptr != pos_str.c_str() + pos_str.size()) {
-                            throw std::runtime_error("Failed to parse full position value to long: " + pos_str);
+                        // pos = strtoul(pos_str.c_str(), &endptr, 10);
+                        // if (endptr != pos_str.c_str() + pos_str.size()) {
+                        //     throw std::runtime_error("Failed to parse full position value to long: " + pos_str);
+                        // }
+                        pos = strtoul(pos_str.buf, &endptr, 10);
+                        if (endptr != pos_str.buf + pos_str.size) {
+                            throw std::runtime_error("Failed to parse full position value to long: "
+                                + std::string(pos_str.buf));
                         }
                     }
                 }
@@ -185,7 +198,7 @@ void sparsify_file_fd(const std::string& compressed_input_filename, const std::s
         }
 
         // Compute sparse file offset for this line
-        size_t variant_offset = sparse_config.compute_sparse_offset(reference_name, pos);
+        size_t variant_offset = sparse_config.compute_sparse_offset(reference_name.buf, pos);
         size_t file_offset = variant_offset + data_start_offset;
         debugf("variant_offset = %lu, file_offset = %lu\n", variant_offset, file_offset);
 
@@ -232,7 +245,7 @@ void sparsify_file_fd(const std::string& compressed_input_filename, const std::s
         // Seek to this offset in the output file
         debugf("max_position = %d, block_size = %d, multiplication_factor = %d, ref_int = %d\n",
             sparse_config.max_position, sparse_config.block_size,
-            sparse_config.multiplication_factor, sparse_config.reference_to_int(reference_name));
+            sparse_config.multiplication_factor, sparse_config.reference_to_int(reference_name.buf));
         debugf("Seeking to output file_offset: %lu\n", file_offset);
         lseek(output_fd, file_offset, SEEK_SET);
 

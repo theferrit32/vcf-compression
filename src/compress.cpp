@@ -256,7 +256,8 @@ int compress(const std::string& input_filename, const std::string& output_filena
 int decompress2_data_line(
         std::ifstream& input_fstream,
         const VcfCompressionSchema& schema,
-        std::string& linebuf,
+        // std::string& linebuf,
+        string_t *linebuf,
         size_t *compressed_line_length) {
     debugf("%s decompressing line, expecting %lu samples\n", __FUNCTION__, schema.sample_count);
     // decompress a single variant line
@@ -328,12 +329,13 @@ int decompress2_data_line(
     for (size_t i = 0; i < required_length; i++) {
         input_fstream.read((char*)&b, 1);
         char cb = reinterpret_cast<char&>(b);
-        linebuf.push_back(cb);
+        // linebuf.push_back(cb);
+        string_appendc(linebuf, cb);
         if (cb == '\t') {
             line_tab_count++;
         }
     }
-    debugf("Finished reading required columns: %s\n", linebuf.c_str());
+    debugf("Finished reading required columns: %s\n", linebuf->buf);
     line_byte_count += required_length;
 
 
@@ -372,8 +374,10 @@ int decompress2_data_line(
             debugf("0|0 repeat count: %u\n", count);
 
             while (counter--) {
-                linebuf.append(GT_00.c_str());
-                linebuf.append(tab);
+                // linebuf.append(GT_00.c_str());
+                // linebuf.append(tab);
+                string_appends(linebuf, GT_00.c_str());
+                string_appendc(linebuf, tab[0]);
             }
 
             // update line counts
@@ -382,7 +386,8 @@ int decompress2_data_line(
 
             // remove last tab if at end of line
             if (line_sample_count >= schema.sample_count) {
-                linebuf.pop_back();
+                // linebuf.pop_back();
+                string_pop(linebuf);
                 line_tab_count--;
             }
         } else if ((b & SAMPLE_MASK_UNCOMPRESSED) == SAMPLE_MASKED_UNCOMPRESSED) {
@@ -412,10 +417,12 @@ int decompress2_data_line(
                     if (line_sample_count < schema.sample_count) {
                         // if not the last term, include the tab
                         // otherwise, the tab is handled outside the if
-                        linebuf.push_back(b);
+                        // linebuf.push_back(b);
+                        string_appendc(linebuf, b);
                     }
                 } else {
-                    linebuf.push_back(b);
+                    // linebuf.push_back(b);
+                    string_appendc(linebuf, b);
                 }
             }
         } else {
@@ -437,10 +444,12 @@ int decompress2_data_line(
             uint8_t count = (b & (~SAMPLE_MASK_01_10_11)) & 0xFF;
             debugf("Got %s, count: %u\n", sample_str->c_str(), count);
             while (count--) {
-                linebuf.append(*sample_str);
+                // linebuf.append(*sample_str);
+                string_appends(linebuf, sample_str->c_str());
                 line_sample_count++;
                 if (line_sample_count < schema.sample_count /*input_fstream.peek() != '\n'*/) {
-                    linebuf.append(tab);
+                    // linebuf.append(tab);
+                    string_appendc(linebuf, tab[0]);
                 }
                 line_tab_count++;
             }
@@ -453,7 +462,8 @@ int decompress2_data_line(
     line_byte_count++;
     if (ib == '\n') {
         b = (char)ib;
-        linebuf.push_back(b);
+        // linebuf.push_back(b);
+        string_appendc(linebuf, b);
     } else {
         throw VcfValidationError("Sample line did not end in a newline\n");
     }
@@ -763,13 +773,16 @@ int decompress2_metadata_headers_fd(
     char c1, c2;
     size_t meta_count = 0, header_count = 0;
 
-    std::string linebuf;
-    linebuf.reserve(4096);
+    // std::string linebuf;
+    // linebuf.reserve(4096);
+    string_t linebuf;
+    string_reserve(&linebuf, 4096);
 
     //debugf("Parsing metadata lines and header line\n");
     while (true) {
         debugf("Reading next line\n");
-        linebuf.clear();
+        // linebuf.clear();
+        string_clear(&linebuf);
 
         if (read(input_fd, &c1, 1) <= 0 && (!got_header || !got_meta)) {
             throw VcfValidationError("File ended before a header or metadata line");
@@ -810,8 +823,10 @@ int decompress2_metadata_headers_fd(
 
         // this is a metadata or header line, so read the rest of the line
         size_t tab_count = 0;
-        linebuf.push_back(c1);
-        linebuf.push_back(c2);
+        // linebuf.push_back(c1);
+        // linebuf.push_back(c2);
+        string_appendc(&linebuf, c1);
+        string_appendc(&linebuf, c2);
 
         while (true) {
             char c3;
@@ -819,7 +834,8 @@ int decompress2_metadata_headers_fd(
                 debugf("No data lines were in the file\n");
             }
             if (c3 == '\n') {
-                linebuf.push_back('\n');
+                // linebuf.push_back('\n');
+                string_appendc(&linebuf, '\n');
                 break;
             }
             if (c3 == '\t') {
@@ -828,11 +844,12 @@ int decompress2_metadata_headers_fd(
                     output_schema.sample_count++;
                 }
             }
-            linebuf.push_back(c3);
+            // linebuf.push_back(c3);
+            string_appendc(&linebuf, c3);
         }
 
-        debugf("Line: %s\n", linebuf.c_str());
-        output_vector.push_back(linebuf);
+        debugf("Line: %s\n", linebuf.buf);
+        output_vector.push_back(linebuf.buf);
     }
     debugf("Line counts: metadata = %ld, header = %ld\n", meta_count, header_count);
     debugf("Sample count: %ld\n", output_schema.sample_count);

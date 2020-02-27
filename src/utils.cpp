@@ -10,6 +10,18 @@ const std::string GT_10("1|0");
 const std::string GT_11("1|1");
 const int eof = std::char_traits<char>::eof();
 
+reference_name_map::reference_name_map() {
+    uint8_t ref_map_val = 1; // counter val for ref -> int map
+    for (size_t ref_idx = 0; ref_idx < references.size(); ref_idx++) {
+        n_map[references[ref_idx]] = ref_map_val++;
+    }
+}
+
+uint8_t reference_name_map::reference_to_int(const std::string& reference_name) {
+    return n_map[reference_name];
+}
+
+
 std::string char_to_bin_string(const char c_input) {
     std::string output;
     const uint8_t c = reinterpret_cast<const uint8_t&>(c_input);

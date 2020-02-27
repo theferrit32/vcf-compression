@@ -83,6 +83,21 @@ extern const int eof;
 //     return v;
 // }
 
+class reference_name_map {
+public:
+    reference_name_map();
+
+    uint8_t reference_to_int(const std::string& reference_name);
+
+private:
+    const std::vector<std::string> references = {
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
+        "13", "14", "15", "16", "17", "18", "19", "20", "21", "22",
+        "X", "Y", "M"};
+
+    std::map<std::string,uint8_t> n_map;
+};
+
 typedef struct {
     byte_t  *bytes;
     size_t len;

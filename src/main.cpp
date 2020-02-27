@@ -314,7 +314,8 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
             string_clear(&linebuf);
 
             uint64_t distance_to_previous, distance_to_next;
-            size_t line_start_offset = lseek(input_fd, 0, SEEK_CUR);
+            // size_t line_start_offset = lseek(input_fd, 0, SEEK_CUR);
+            size_t line_start_offset = tellfd(input_fd);
             if (read(input_fd, &distance_to_previous, sizeof(uint64_t)) <= 0) {
                 throw std::runtime_error("couldn't read from file");
             }
@@ -452,14 +453,203 @@ public:
 
 };
 
+
+
+struct index_entry {
+    uint8_t reference_name_idx;
+    uint32_t position;
+    uint64_t byte_offset;
+};
+
+
+
+
 void create_binning_index(const std::string& compressed_input_filename, const std::string& index_filename) {
     int input_fd = open(compressed_input_filename.c_str(), O_RDONLY);
     if (input_fd < 0) {
         perror("open");
         throw std::runtime_error("Failed to open file: " + compressed_input_filename);
     }
+    int output_fd = open(index_filename.c_str(), DEFAULT_FILE_CREATE_MODE);
+    if (output_fd < 0) {
+        perror("open");
+        throw std::runtime_error("Failed to open output file: " + index_filename);
+    }
+
     int status;
     VcfCompressionSchema schema;
+    debugf("Parsing metadata lines and header line\n");
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    decompress2_metadata_headers_fd(input_fd, meta_header_lines, schema);
+
+    VcfPackedBinningIndexConfiguration index_configuration(10);
+
+    reference_name_map ref_name_map;
+
+    std::vector<byte_t> line_bytes;
+    line_bytes.reserve(4096);
+
+    // Counter to handle entries per bin
+    size_t line_number = 0;
+
+    // Iterate through lines of compressed file
+    while (true) {
+        long line_byte_offset = tellfd(input_fd);
+
+        debugf("Start of line, stream positioned so next byte is at position %ld (0x%08lx)\n",
+                line_byte_offset,
+                line_byte_offset);
+
+        // right now all length headers are 4 bytes
+        // TODO update to interpret variable-length length headers
+        uint8_t line_length_header_bytes[4] = {0,0,0,0};
+
+        status = read(input_fd, &line_length_header_bytes, 4);
+        if (status < 0) {
+            throw std::runtime_error("Error reading from file");
+        } else if (status == 0) {
+            debugf("Finished sparsifying file\n");
+            break;
+        } else if (status < 4) {
+            throw std::runtime_error(string_format("Only read %d bytes, expected 4", status));
+        }
+
+        debugf("line_length_header_bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
+                line_length_header_bytes[0],
+                line_length_header_bytes[1],
+                line_length_header_bytes[2],
+                line_length_header_bytes[3]);
+
+        uint8_t required_columns_length_header_bytes[4] = {0,0,0,0};
+
+        status = read(input_fd, &required_columns_length_header_bytes, 4);
+        if (status < 0) {
+            throw std::runtime_error("Error reading from file");
+        } else if (status == 0) {
+            debugf("Finished sparsifying file\n");
+            break;
+        } else if (status < 4) {
+            throw std::runtime_error(string_format("Only read %d bytes, expected 4", status));
+        }
+
+        debugf("required_columns_length_header_bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
+                required_columns_length_header_bytes[0],
+                required_columns_length_header_bytes[1],
+                required_columns_length_header_bytes[2],
+                required_columns_length_header_bytes[3]);
+
+        uint64_t read_bytes = 4 + 4; // length headers
+
+        debugf("After length headers, stream positioned so next byte is at position %ld (0x%08lx)\n",
+                tellfd(input_fd),
+                tellfd(input_fd));
+
+        LineLengthHeader line_length_header;
+        line_length_header.set_extension_count(3); // TODO interpret
+        line_length_header.deserialize(line_length_header_bytes);
+
+        debugf("Line length: %d\n", line_length_header.length);
+
+        // collect bytes to end of line
+        size_t i = 0;
+        line_bytes.clear();
+        if (line_bytes.capacity() < line_length_header.length + read_bytes) {
+            line_bytes.reserve(line_length_header.length + read_bytes);
+        }
+
+        // two uint64 placeholders for diffs to previous, next line
+        for (size_t placeholder_i = 0; placeholder_i < 16; placeholder_i++) {
+            line_bytes.push_back(0);
+        }
+
+        line_bytes.push_back(line_length_header_bytes[0]);
+        line_bytes.push_back(line_length_header_bytes[1]);
+        line_bytes.push_back(line_length_header_bytes[2]);
+        line_bytes.push_back(line_length_header_bytes[3]);
+        line_bytes.push_back(required_columns_length_header_bytes[0]);
+        line_bytes.push_back(required_columns_length_header_bytes[1]);
+        line_bytes.push_back(required_columns_length_header_bytes[2]);
+        line_bytes.push_back(required_columns_length_header_bytes[3]);
+
+        debugf("line_bytes with headers only: %s\n", byte_vector_to_string(line_bytes).c_str());
+
+        // keep track of some column values as we go across, for offset calculation
+        bool got_reference_name = false;
+        string_t reference_name;
+        string_reserve(&reference_name, 32);
+
+        bool got_pos = false;
+        string_t pos_str;
+        string_reserve(&pos_str, 32);
+
+        size_t pos = 0;
+
+        // iterate over the rest of the line
+        // subtract 4 due to length of required_columns_length_header_bytes, which are already read
+        while (i++ < line_length_header.length - 4) {
+            unsigned char b;
+            if (read(input_fd, &b, 1) <= 0) {
+                std::string msg = string_format(
+                    "Unexpectedly reached end of compressed file, line header said %d, but only read %d bytes from line",
+                    line_length_header.length, i);
+                throw VcfValidationError(msg.c_str());
+            }
+            line_bytes.push_back(b);
+
+            if (!got_reference_name) {
+                if (b != '\t') {
+                    string_appendc(&reference_name, b);
+                } else {
+                    if (reference_name.size == 0) {
+                        throw std::runtime_error("Line did not contain a reference name");
+                    } else {
+                        debugf("Got reference name: %s\n", reference_name.buf);
+                        got_reference_name = true;
+                    }
+                }
+            } else if (!got_pos) {
+                if (b != '\t') {
+                    // pos_str += b;
+                    string_appendc(&pos_str, b);
+                } else {
+                    // if (pos_str.size() == 0) {
+                    if (pos_str.size == 0) {
+                        throw std::runtime_error("Line did not contain a position value");
+                    } else {
+                        debugf("Got position: %s\n", pos_str.buf);
+                        got_pos = true;
+                        char *endptr = NULL;
+                        pos = strtoul(pos_str.buf, &endptr, 10);
+                        if (endptr != pos_str.buf + pos_str.size) {
+                            throw std::runtime_error("Failed to parse full position value to long: "
+                                + std::string(pos_str.buf));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Determine whether to write this entry to the index or whether it is inside the current bin
+        if (line_number % index_configuration.entries_per_bin == 0) {
+            struct index_entry entry;
+            char *endptr;
+            entry.reference_name_idx = ref_name_map.reference_to_int(reference_name.buf);
+            entry.position = pos;
+            entry.byte_offset = line_byte_offset;
+            debugf("Writing entry to index %d %d %ld\n",
+                entry.reference_name_idx, entry.position, entry.byte_offset);
+            write(output_fd, &entry.reference_name_idx, sizeof(uint8_t));
+            write(output_fd, &entry.position, sizeof(uint32_t));
+            write(output_fd, &entry.byte_offset, sizeof(uint64_t));
+        } else {
+            debugf("Not writing entry to index\n");
+        }
+        line_number++;
+    }
+
+    close(output_fd);
+    close(input_fd);
 }
 
 
