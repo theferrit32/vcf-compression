@@ -9,6 +9,8 @@ const std::string GT_01("0|1");
 const std::string GT_10("1|0");
 const std::string GT_11("1|1");
 const int eof = std::char_traits<char>::eof();
+size_t compressed_line_length_headers_size =
+    sizeof(uint32_t) + sizeof(uint32_t);
 
 reference_name_map::reference_name_map() {
     uint8_t ref_map_val = 1; // counter val for ref -> int map
@@ -223,4 +225,11 @@ int peek_FILE(FILE *stream) {
     int c = fgetc(stream);
     ungetc(c, stream);
     return c;
+}
+
+bool file_exists(const char *filename) {
+    struct stat statbuf;
+    memset(&statbuf, 0, sizeof(struct stat));
+    int status = stat(filename, &statbuf);
+    return status == 0;
 }

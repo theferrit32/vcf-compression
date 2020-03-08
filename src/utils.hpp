@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdarg.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -22,8 +23,10 @@ typedef uint8_t byte_t;
     #define debugf(...) {}
 #endif
 
-
+#define DEFAULT_FILE_CREATE_FLAGS (O_CREAT | O_WRONLY)
 #define DEFAULT_FILE_CREATE_MODE (S_IRUSR | S_IWUSR)
+#define VCFC_BINNING_INDEX_EXTENSION ".vcfci"
+
 
 // regex submatch flag to match everything not in the pattern
 #define REGEX_SELECT_NOTMATCH -1
@@ -125,6 +128,13 @@ public:
     size_t sample_count = 0;
     std::map<std::string,byte_array> sequence_map;
 };
+
+
+struct compressed_line_length_headers {
+    uint32_t line_length;
+    uint32_t required_columns_length;
+};
+extern size_t compressed_line_length_headers_size;
 
 #define LINE_LENGTH_HEADER_MAX_EXTENSION 3
 class LineLengthHeader {
@@ -258,5 +268,6 @@ int peekfd(int fd, unsigned char *c);
 bool eof_fd(int fd);
 // Provides istream::peek function for C FILEs
 int peek_FILE(FILE *stream);
+bool file_exists(const char *filename);
 
 #endif

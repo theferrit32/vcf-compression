@@ -21,6 +21,7 @@ int decompress2_metadata_headers_fd(
         int input_fd,
         std::vector<std::string>& output_vector,
         VcfCompressionSchema& output_schema);
+int read_compressed_line_length_headers(int input_fd, struct compressed_line_length_headers *length_headers);
 int decompress2_data_line_fd2(
         int input_fd,
         const VcfCompressionSchema& schema,

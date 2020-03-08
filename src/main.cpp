@@ -32,32 +32,38 @@ int usage() {
 class VcfCoordinateQuery {
 public:
     VcfCoordinateQuery(
-            const std::string& reference_name,
-            uint64_t start_position,
-            uint64_t end_position) {
-        this->reference_name = reference_name;
-        this->start_position = start_position;
-        this->has_start_position = true;
-        this->end_position = end_position;
-        this->has_end_position = true;
-    }
+        const std::string& reference_name,
+        uint64_t start_position,
+        uint64_t end_position) :
+            reference_name(reference_name),
+            start_position(start_position),
+            end_position(end_position),
+            has_start_position(true),
+            has_end_position(true) {}
 
-    VcfCoordinateQuery() {
-        this->reference_name = "";
-        this->start_position = -1;
-        this->end_position = -1;
-        this->has_start_position = false;
-        this->has_end_position = false;
-    }
+    VcfCoordinateQuery(
+        const std::string& reference_name) :
+            reference_name(reference_name),
+            start_position(0),
+            end_position(0),
+            has_start_position(false),
+            has_end_position(false) {}
+
+    VcfCoordinateQuery() :
+            reference_name(""),
+            start_position(0),
+            end_position(0),
+            has_start_position(false),
+            has_end_position(false) {}
 
     bool matches(const std::string& reference_name, uint64_t position) {
         if (this->reference_name.size() > 0 && this->reference_name != reference_name) {
             return false;
         }
-        if (this->has_start_position && this->start_position > position) {
+        if (this->has_start_position && position < this->start_position) {
             return false;
         }
-        if (this->has_end_position && this->end_position < position) {
+        if (this->has_end_position && position > this->end_position) {
             return false;
         }
         return true;
@@ -65,8 +71,8 @@ public:
 
     bool has_criteria() {
         return this->reference_name.size() > 0
-            || this->start_position >= 0
-            || this->end_position >= 0;
+            || this->has_start_position
+            || this->has_end_position;
     }
 
     const std::string& get_reference_name() {
@@ -84,8 +90,8 @@ public:
 private:
     std::string reference_name;
     uint64_t start_position;
-    bool has_start_position;
     uint64_t end_position;
+    bool has_start_position;
     bool has_end_position;
 };
 
@@ -156,17 +162,17 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
     std::vector<std::string> meta_header_lines;
     meta_header_lines.reserve(256);
 
-    #ifdef DEBUG
+    #ifdef TIMING
     std::chrono::time_point<std::chrono::steady_clock> start;
     std::chrono::time_point<std::chrono::steady_clock> end;
     std::chrono::nanoseconds duration;
     start = std::chrono::steady_clock::now();
     #endif
     decompress2_metadata_headers_fd(input_fd, meta_header_lines, schema);
-    #ifdef DEBUG
+    #ifdef TIMING
     end = std::chrono::steady_clock::now();
     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    debugf("decompress2_metadata_headers time: %lu\n", duration.count());
+    printf("decompress2_metadata_headers time: %lu\n", duration.count());
     #endif
 
     // Leave default sparse config
@@ -224,7 +230,12 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
             string_t linebuf;
             string_reserve(&linebuf, 4 * 1024);
             size_t linelength;
-            decompress2_data_line_fd2(input_fd, schema, &linebuf, &linelength);
+            int status = decompress2_data_line_fd2(input_fd, schema, &linebuf, &linelength);
+            if (status == 0) {
+                throw std::runtime_error("Unexpected EOF\n");
+            } else if (status < 0) {
+                throw std::runtime_error("Failed to decompress data line\n");
+            }
             for (size_t i = 0; i < linebuf.size; i++) {
                 printf("%c", linebuf.buf[i]);
             }
@@ -334,16 +345,21 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
                 end_of_reference = true;
             }
 
-            #ifdef DEBUG
+            #ifdef TIMING
             start = std::chrono::steady_clock::now();
             #endif
             debugf("current offset: %ld\n", lseek(input_fd, 0, SEEK_CUR));
-            decompress2_data_line_fd2(input_fd, schema, &linebuf, &linelength);
-            #ifdef DEBUG
+            int status = decompress2_data_line_fd2(input_fd, schema, &linebuf, &linelength);
+            #ifdef TIMING
             end = std::chrono::steady_clock::now();
             duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-            debugf("decompress2_data_line time: %lu\n", duration.count());
+            printf("decompress2_data_line time: %lu\n", duration.count());
             #endif
+            if (status == 0) {
+                throw std::runtime_error("Unexpected EOF");
+            } else if (status < 0) {
+                throw std::runtime_error("Failed to decompress data line\n");
+            }
 
             debugf("compressed bytes read: %lu\n", linelength);
             // Update distance_to_next based on bytes already read from input stream
@@ -353,28 +369,28 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
             debugf("bytes_read_so_far = %lu, new distance_to_next = %lu\n", bytes_read_so_far, distance_to_next);
 
             // time copy of linebuf
-            #ifdef DEBUG
+            #ifdef TIMING
             start = std::chrono::steady_clock::now();
             #endif
             SplitIterator spi(linebuf.buf, "\t");
-            #ifdef DEBUG
+            #ifdef TIMING
             end = std::chrono::steady_clock::now();
             duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-            debugf("SplitIterator.constructor time: %lu\n", duration.count());
+            printf("SplitIterator.constructor time: %lu\n", duration.count());
             #endif
 
-            #ifdef DEBUG
+            #ifdef TIMING
             start = std::chrono::steady_clock::now();
             #endif
             std::string reference_name = spi.next();
             std::string pos_str = spi.next();
-            #ifdef DEBUG
+            #ifdef TIMING
             end = std::chrono::steady_clock::now();
             duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-            debugf("SplitIterator.next time: %lu\n", duration.count());
+            printf("SplitIterator.next time: %lu\n", duration.count());
             #endif
 
-            #ifdef DEBUG
+            #ifdef TIMING
             start = std::chrono::steady_clock::now();
             #endif
             char *endptr = NULL;
@@ -382,10 +398,10 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
             if (endptr != pos_str.data() + pos_str.size()) {
                 throw new std::runtime_error("Couldn't parse pos column: " + pos_str);
             }
-            #ifdef DEBUG
+            #ifdef TIMING
             end = std::chrono::steady_clock::now();
             duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-            debugf("strtoul time: %lu\n", duration.count());
+            printf("strtoul time: %lu\n", duration.count());
             #endif
 
             debugf("line reference_name = %s, pos = %lu; query reference_name = %s, end_position = %lu\n",
@@ -405,14 +421,17 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
                 } else {
                     debugf("Seeking ahead to next line\n");
                     #ifdef DEBUG
-                    start = std::chrono::steady_clock::now();
                     long current_offset = tellfd(input_fd);
                     #endif
+
+                    #ifdef TIMING
+                    start = std::chrono::steady_clock::now();
+                    #endif
                     lseek(input_fd, distance_to_next, SEEK_CUR);
-                    #ifdef DEBUG
+                    #ifdef TIMING
                     end = std::chrono::steady_clock::now();
                     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-                    debugf("lseek time: %lu\n", duration.count());
+                    printf("lseek time: %lu\n", duration.count());
                     #endif
 
                     debugf("Previously at address: %ld, now at address: %ld\n", current_offset, tellfd(input_fd));
@@ -454,6 +473,8 @@ public:
 };
 
 
+size_t struct_index_entry_size =
+    sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint64_t);
 
 struct index_entry {
     uint8_t reference_name_idx;
@@ -461,7 +482,58 @@ struct index_entry {
     uint64_t byte_offset;
 };
 
+int write_index_entry(int fd, struct index_entry *entry) {
+    write(fd, &entry->reference_name_idx, sizeof(entry->reference_name_idx));
+    write(fd, &entry->position, sizeof(entry->position));
+    write(fd, &entry->byte_offset, sizeof(entry->byte_offset));
+    return 0;
+}
 
+/**
+ * Returns 0 on success. Sets `bytes_read` to the number of bytes read. Should be the
+ * sum of the size of the fields in a struct index_entry.
+ */
+int read_index_entry(int fd, struct index_entry *entry, int *bytes_read) {
+    int read_count = 0, n = 0;
+    n = read(fd, &(entry->reference_name_idx), sizeof(uint8_t));
+    if (n == 0) {
+        debugf("Unexpected EOF\n");
+        return -1;
+    } else if (n < 0) {
+        perror("read");
+        debugf("Failed to read reference_name_idx, status = %d\n", n);
+        return -1;
+    } else {
+        read_count += n;
+    }
+
+    n = read(fd, &entry->position, sizeof(uint32_t));
+    if (n == 0) {
+        debugf("Unexpected EOF\n");
+        return -1;
+    } else if (n < 0) {
+        perror("read");
+        debugf("Failed to read position, status = %d\n", n);
+        return -1;
+    } else {
+        read_count += n;
+    }
+
+    n = read(fd, &entry->byte_offset, sizeof(uint64_t));
+    if (n == 0) {
+        debugf("Unexpected EOF\n");
+        return -1;
+    } else if (n < 0) {
+        perror("read");
+        debugf("Failed to read byte_offset, status = %d\n", n);
+        return -1;
+    } else {
+        read_count += n;
+    }
+
+    *bytes_read = read_count;
+    return 0;
+}
 
 
 void create_binning_index(const std::string& compressed_input_filename, const std::string& index_filename) {
@@ -470,7 +542,7 @@ void create_binning_index(const std::string& compressed_input_filename, const st
         perror("open");
         throw std::runtime_error("Failed to open file: " + compressed_input_filename);
     }
-    int output_fd = open(index_filename.c_str(), DEFAULT_FILE_CREATE_MODE);
+    int output_fd = open(index_filename.c_str(), DEFAULT_FILE_CREATE_FLAGS, DEFAULT_FILE_CREATE_MODE);
     if (output_fd < 0) {
         perror("open");
         throw std::runtime_error("Failed to open output file: " + index_filename);
@@ -633,15 +705,13 @@ void create_binning_index(const std::string& compressed_input_filename, const st
         // Determine whether to write this entry to the index or whether it is inside the current bin
         if (line_number % index_configuration.entries_per_bin == 0) {
             struct index_entry entry;
-            char *endptr;
+            // char *endptr;
             entry.reference_name_idx = ref_name_map.reference_to_int(reference_name.buf);
             entry.position = pos;
             entry.byte_offset = line_byte_offset;
             debugf("Writing entry to index %d %d %ld\n",
                 entry.reference_name_idx, entry.position, entry.byte_offset);
-            write(output_fd, &entry.reference_name_idx, sizeof(uint8_t));
-            write(output_fd, &entry.position, sizeof(uint32_t));
-            write(output_fd, &entry.byte_offset, sizeof(uint64_t));
+            write_index_entry(output_fd, &entry);
         } else {
             debugf("Not writing entry to index\n");
         }
@@ -653,6 +723,221 @@ void create_binning_index(const std::string& compressed_input_filename, const st
 }
 
 
+
+/**
+ * Reads a reference name and position column from uncompressed TSV file input.
+ *
+ * Returns the number of bytes read.
+ *
+ * Returns negative on error, if two TSV columns are not read, or the pos field is not an integer.
+ */
+int read_reference_name_and_pos(int input_fd, std::string *reference_name_out, uint64_t *pos_out) {
+    int status, read_bytes = 0;
+    char c;
+    std::string ref;
+    while (true) {
+        status = read(input_fd, &c, 1);
+        if (status < 0) {
+            debugf("Failed to read from file\n");
+            return -1;
+        } else if (status == 0) {
+            debugf("Unexpected EOF while reading for reference name!\n");
+            return -1;
+        }
+
+        read_bytes++;
+        if (c == '\t') {
+            break;
+        }
+        ref.push_back(c);
+    }
+
+    std::string pos_str;
+    while (true) {
+        status = read(input_fd, &c, 1);
+        if (status < 0) {
+            debugf("Failed to read from file\n");
+            return -1;
+        } else if (status == 0) {
+            debugf("Unexpected EOF while reading for position!");
+            return -1;
+        }
+
+        read_bytes++;
+        if (c == '\t') {
+            break;
+        }
+        pos_str.push_back(c);
+    }
+
+    bool conversion_success = false;
+    uint64_t pos = str_to_uint64(pos_str, conversion_success);
+    if (!conversion_success) {
+        debugf("Malformed line, pos column must be int but got: %s", pos_str.c_str());
+        return -1;
+        // throw VcfValidationError(string_format("Malformed line, pos column must be int but got: %s", pos_str.c_str()).c_str());
+    }
+    *reference_name_out = ref;
+    *pos_out = pos;
+    return read_bytes;
+}
+
+void query_binned_index(const std::string& compressed_filename, VcfCoordinateQuery query) {
+    int status;
+    std::string index_filename = compressed_filename + VCFC_BINNING_INDEX_EXTENSION;
+    int compressed_fd = open(compressed_filename.c_str(), O_RDONLY);
+    if (compressed_fd < 0) {
+        perror("open");
+        debugf("Failed to open input file: %s\n", compressed_filename.c_str());
+        return;
+    }
+    if (!file_exists(index_filename.c_str())) {
+        // throw std::runtime_error("Failed to open index file: " + index_filename);
+        debugf("Failed to open index file: %s\n", index_filename.c_str());
+        return;
+    }
+    int index_fd = open(index_filename.c_str(), O_RDONLY);
+    if (index_fd < 0) {
+        perror("open");
+        // throw std::runtime_error("Failed to open index file: " + index_filename);
+        debugf("Failed to open index file: %s\n", index_filename.c_str());
+        return;
+    }
+
+    debugf("Parsing metadata lines and header line\n");
+    VcfCompressionSchema schema;
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    decompress2_metadata_headers_fd(compressed_fd, meta_header_lines, schema);
+
+    struct index_entry start_entry;
+    memset(&start_entry, 0, sizeof(start_entry));
+
+    reference_name_map ref_name_map;
+    uint8_t query_reference_name_idx = ref_name_map.reference_to_int(query.get_reference_name());
+
+    // Find bin before the first bin start that matches the query
+    long start_entry_address = 0;
+    bool at_least_one_entry = false;
+    struct index_entry entry;
+    enum query_state {
+        BEFORE_QUERY, IN_QUERY, AFTER_QUERY
+    };
+    enum query_state current_state = query_state::BEFORE_QUERY;
+    int bytes_read;
+    while (true) {
+        size_t current_entry_address = tellfd(index_fd);
+        if (read_index_entry(index_fd, &entry, &bytes_read) != 0) {
+            debugf("Failed to read a full index_entry from index file");
+            close(compressed_fd);
+            close(index_fd);
+            return;
+            // throw std::runtime_error("Failed to read a full index_entry from index file");
+        }
+
+        at_least_one_entry = true;
+        // This bin entry starts exactly at the query start range
+        if (entry.reference_name_idx == query_reference_name_idx
+                && entry.position == query.get_start_position()) {
+            debugf("Index bin starts exactly at start of query range\n");
+            start_entry_address = current_entry_address;
+            current_state = query_state::IN_QUERY; // starting in the query range already
+            break;
+        }
+        // This bin entry is after the query start range, so should start before this
+        else if (entry.reference_name_idx >= query_reference_name_idx
+                && entry.position >= query.get_start_position()) {
+            debugf("Index bin is after the start of the query range\n");
+            start_entry_address = current_entry_address;
+            // If there is a preceeding bin, start there
+            if (current_entry_address != 0) {
+                start_entry_address -= struct_index_entry_size;
+                lseek(index_fd, start_entry_address, SEEK_SET);
+                // re-read previous entry
+                debugf("Re-reading previous index entry\n");
+                if (read_index_entry(index_fd, &entry, &bytes_read) != 0) {
+                    debugf("Failed to read a full index_entry from index file");
+                    close(compressed_fd);
+                    close(index_fd);
+                    return;
+                    // throw std::runtime_error("Failed to read a full index_entry from index file");
+                }
+            }
+            break;
+        }
+    }
+
+    debugf("query start_entry_address = %ld\n", start_entry_address);
+    #ifdef DEBUG
+    int bin_idx = start_entry_address / struct_index_entry_size;
+    debugf("bin_idx = %d\n", bin_idx);
+    #endif
+    string_t linebuf;
+    string_reserve(&linebuf, 2048);
+
+    if (at_least_one_entry) {
+        debugf("entry reference_name_idx = %u, position = %u, byte_offset = %lu\n",
+            entry.reference_name_idx, entry.position, entry.byte_offset);
+
+        // Iterate through data file
+        lseek(compressed_fd, entry.byte_offset, SEEK_SET);
+        // struct compressed_line_length_headers length_headers;
+
+        // Record the number of lines scanned before hitting the desired range
+        int before_count = 0;
+
+        while (true) {
+            string_clear(&linebuf);
+            size_t compressed_line_length;
+            status = decompress2_data_line_fd2(compressed_fd, schema, &linebuf, &compressed_line_length);
+            if (status == 0) {
+                // EOF
+                debugf("End of input file\n");
+                break;
+            } else if (status < 0) {
+                throw VcfValidationError("Error, failed to read next line from compressed input file");
+            }
+            SplitIterator spi(linebuf.buf, "\t");
+            if (!spi.has_next()) {
+                throw VcfValidationError("Line did not match expected schema\n");
+            }
+            std::string reference_name = spi.next();
+            if (!spi.has_next()) {
+                throw VcfValidationError("Line did not match expected schema\n");
+            }
+            std::string pos_str = spi.next();
+            bool conversion_success = false;
+            uint64_t pos = str_to_uint64(pos_str, conversion_success);
+            if (!conversion_success) {
+                throw VcfValidationError(("Failed to parse integer pos from " + pos_str).c_str());
+            }
+            debugf("Checking reference_name = %s, pos = %lu against query reference_name = %s, start = %lu, end = %lu\n",
+                reference_name.c_str(), pos, query.get_reference_name().c_str(), query.get_start_position(), query.get_end_position());
+            if (query.matches(reference_name, pos)) {
+                current_state = query_state::IN_QUERY;
+                printf(linebuf.buf);
+            } else if (current_state == query_state::IN_QUERY) {
+                current_state = query_state::AFTER_QUERY;
+                debugf("Reached end of query range\n");
+                break;
+            } else if (current_state == query_state::BEFORE_QUERY) {
+                debugf("Still before query range\n");
+                before_count++;
+                continue;
+            }
+        }
+        debugf("lines decompressed before query = %d\n", before_count);
+
+    } else {
+        debugf("Index was empty\n");
+    }
+
+    free(linebuf.buf);
+    close(index_fd);
+    close(compressed_fd);
+}
+
+
 void query_compressed_file(const std::string& input_filename, VcfCoordinateQuery query) {
     debugf("Querying %s for %s:%lu-%lu\n", input_filename.c_str(),
         query.get_reference_name().c_str(),
@@ -660,9 +945,9 @@ void query_compressed_file(const std::string& input_filename, VcfCoordinateQuery
         query.get_end_position());
     int input_fd = open(input_filename.c_str(), O_RDONLY);
     int status;
-    VcfCompressionSchema schema;
-    debugf("Parsing metadata lines and header line\n");
 
+    debugf("Parsing metadata lines and header line\n");
+    VcfCompressionSchema schema;
     std::vector<std::string> meta_header_lines;
     meta_header_lines.reserve(256);
     decompress2_metadata_headers_fd(input_fd, meta_header_lines, schema);
@@ -772,8 +1057,14 @@ void query_compressed_file(const std::string& input_filename, VcfCoordinateQuery
             size_t compressed_line_length = 0;
 
             int status = decompress2_data_line_fd2(input_fd, schema, &variant_line, &compressed_line_length);
-            if (status < 0) {
-                break;
+            if (status == 0) {
+                // EOF
+                throw std::runtime_error("Unexpected EOF");
+                // break;
+            }
+            else if (status < 0) {
+                throw std::runtime_error("Failed to decompressed data line\n");
+                // break;
             }
 
             matched_line_count++;
@@ -829,8 +1120,10 @@ void gap_analysis(const std::string& input_filename) {
         string_clear(&variant_line);
         size_t compressed_line_length = 0;
         int status = decompress2_data_line_fd2(input_fd, schema, &variant_line, &compressed_line_length);
-        if (status < 0) {
+        if (status == 0) {
             break;
+        } else if (status < 0) {
+            throw std::runtime_error("Failed to decompress data line\n");
         }
         // split the line
         std::vector<std::string> line_terms = split_string(std::string(variant_line.buf), "\t");
@@ -847,6 +1140,51 @@ void gap_analysis(const std::string& input_filename) {
     close(input_fd);
 }
 
+/**
+ * Parses a coordinate query into a VcfCoordinateQuery object. Overwrites existing query input.
+ *
+ * Expects `s` to be of one of the following forms:
+ *
+ * - "<ref>"
+ *
+ * - "<ref>:<start>-<end>"
+ *
+ * Returns 0 on success, negative on error.
+ */
+int parse_coordinate_string(const std::string& s, VcfCoordinateQuery& query) {
+    // int status;
+    size_t colon_idx = s.find_first_of(':');
+    if (colon_idx == std::string::npos) {
+        // only passed a reference name
+        debugf("query reference_name = %s\n", s.c_str());
+        query = VcfCoordinateQuery(s);
+        return 0;
+    } else {
+        std::string reference_name = s.substr(0, colon_idx - 0);
+        size_t dash_idx = s.find_first_of('-', colon_idx + 1);
+        if (dash_idx == std::string::npos) {
+            printf("Query must contain a dash character: <ref>:<start>-<end>\n");
+            return -1;
+        }
+        std::string start_str = s.substr(colon_idx + 1, dash_idx - (colon_idx + 1));
+        std::string end_str = s.substr(dash_idx + 1);
+        bool success = false;
+        uint64_t start_pos = str_to_uint64(start_str, success);
+        if (!success) {
+            printf("Failed to parse int from start position: %s\n", start_str.c_str());
+            return -1;
+        }
+        uint64_t end_pos = str_to_uint64(end_str, success);
+        if (!success) {
+            printf("Failed to parse int from end position: %s\n", end_str.c_str());
+            return -1;
+        }
+        debugf("query reference_name = %s, start = %lu, end = %lu\n", reference_name.c_str(), start_pos, end_pos);
+        query = VcfCoordinateQuery(reference_name, start_pos, end_pos);
+    }
+
+    return 0;
+}
 
 int main(int argc, char **argv) {
     // mostly just using posix fd functions, so disable sync
@@ -860,6 +1198,9 @@ int main(int argc, char **argv) {
         gap_analysis(input_filename);
     } else if (action == "compress" || action == "decompress") {
         std::string input_filename(argv[2]);
+        if (!file_exists(input_filename.c_str())) {
+            printf("Input file does not exist: %s\n", input_filename.c_str());
+        }
         std::string output_filename(argv[3]);
         if (input_filename == output_filename) {
             throw std::runtime_error("input and output file are the same");
@@ -872,24 +1213,20 @@ int main(int argc, char **argv) {
 
         if (status < 0) {
             std::cerr << "Error in compression of file" << std::endl;
+            return 1;
         }
     } else if (action == "query") {
         std::string input_filename(argv[2]);
-        std::string reference_name(argv[3]);
-        std::string start_position_str(argv[4]);
-        std::string end_position_str(argv[5]);
-        bool conversion_success = false;
-        uint64_t start_position = str_to_uint64(start_position_str, conversion_success);
-        if (!conversion_success) {
-            std::cerr << "Start position must be an integer: " << start_position_str << std::endl;
+        if (!file_exists(input_filename.c_str())) {
+            printf("Input file does not exist: %s\n", input_filename.c_str());
+        }
+        std::string query_input(argv[3]);
+        VcfCoordinateQuery query;
+        status = parse_coordinate_string(query_input, query);
+        if (status != 0) {
+            printf("Failed to parse query string: %s\n", query_input.c_str());
             return 1;
         }
-        uint64_t end_position = str_to_uint64(end_position_str, conversion_success);
-        if (!conversion_success) {
-            std::cerr << "End position must be an integer: " << end_position_str << std::endl;
-            return 1;
-        }
-        VcfCoordinateQuery query(reference_name, start_position, end_position);
         query_compressed_file(input_filename, query);
     } else if (action == "gap-analysis") {
         std::string input_filename(argv[2]);
@@ -900,26 +1237,48 @@ int main(int argc, char **argv) {
         }
         std::string input_filename(argv[2]);
         std::string output_filename(argv[3]);
+        if (input_filename == output_filename) {
+            throw std::runtime_error("input and output file are the same");
+        }
+        if (!file_exists(input_filename.c_str())) {
+            printf("Input file does not exist: %s\n", input_filename.c_str());
+        }
         sparsify_file_fd(input_filename, output_filename);
     } else if (action == "sparse-query") {
         std::string input_filename(argv[2]);
-        std::string reference_name(argv[3]);
-        std::string start_position_str(argv[4]);
-        std::string end_position_str(argv[5]);
-        bool conversion_success = false;
-        uint64_t start_position = str_to_uint64(start_position_str, conversion_success);
-        if (!conversion_success) {
-            std::cerr << "Start position must be an integer: " << start_position_str << std::endl;
+        std::string query_input(argv[3]);
+        VcfCoordinateQuery query;
+        status = parse_coordinate_string(query_input, query);
+        if (status != 0) {
+            printf("Failed to parse query string: %s\n", query_input.c_str());
             return 1;
         }
-        uint64_t end_position = str_to_uint64(end_position_str, conversion_success);
-        if (!conversion_success) {
-            std::cerr << "End position must be an integer: " << end_position_str << std::endl;
-            return 1;
-        }
-        VcfCoordinateQuery query(reference_name, start_position, end_position);
         query_sparse_file_fd(input_filename, query);
 
+    } else if (action == "create-binned-index") {
+        std::string input_filename(argv[2]);
+        std::string index_filename = input_filename + VCFC_BINNING_INDEX_EXTENSION;
+        create_binning_index(input_filename, index_filename);
+    } else if (action == "query-binned-index") {
+        std::string input_filename(argv[2]);
+        std::string index_filename = input_filename + VCFC_BINNING_INDEX_EXTENSION;
+        if (!file_exists(input_filename.c_str())) {
+            printf("Input file does not exist: %s\n", input_filename.c_str());
+        }
+        if (!file_exists(index_filename.c_str())) {
+            printf("Index file does not exist: %s\n", index_filename.c_str());
+        }
+
+        std::string query_input(argv[3]);
+        VcfCoordinateQuery query;
+        status = parse_coordinate_string(query_input, query);
+        if (status != 0) {
+            printf("Failed to parse query string: %s\n", query_input.c_str());
+            return 1;
+        }
+        debugf("query reference_name = %s, start = %lu, end = %lu\n",
+            query.get_reference_name().c_str(), query.get_start_position(), query.get_end_position());
+        query_binned_index(input_filename, query);
     }
     else {
         std::cout << "Unknown action name: " << action << std::endl;
