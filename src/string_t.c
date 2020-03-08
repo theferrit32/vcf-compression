@@ -20,7 +20,7 @@ void string_set(string_t *str, const char *val) {
 }
 
 /**
- * Initializes a string_t structure
+ * Initializes a string_t structure. Writes to all fields.
  */
 void string_init(string_t *str) {
     str->buf = (char *) calloc(string_t_initial_capacity, sizeof(char));
@@ -29,7 +29,9 @@ void string_init(string_t *str) {
 }
 
 /**
+ * Reserves the buffer of str to have provided capacity.
  *
+ * If str already had a malloced buffer, it is not freed.
  */
 void string_reserve(string_t *str, size_t capacity) {
     str->buf = (char *) calloc(capacity, sizeof(char));
