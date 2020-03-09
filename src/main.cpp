@@ -555,7 +555,7 @@ void create_binning_index(const std::string& compressed_input_filename, const st
     meta_header_lines.reserve(256);
     decompress2_metadata_headers_fd(input_fd, meta_header_lines, schema);
 
-    VcfPackedBinningIndexConfiguration index_configuration(10);
+    VcfPackedBinningIndexConfiguration index_configuration(100);
 
     reference_name_map ref_name_map;
 
