@@ -784,6 +784,15 @@ int read_reference_name_and_pos(int input_fd, std::string *reference_name_out, u
 
 void query_binned_index(const std::string& compressed_filename, VcfCoordinateQuery query) {
     int status;
+    #ifdef TIMING
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    #endif
+
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    #endif
     std::string index_filename = compressed_filename + VCFC_BINNING_INDEX_EXTENSION;
     int compressed_fd = open(compressed_filename.c_str(), O_RDONLY);
     if (compressed_fd < 0) {
@@ -803,6 +812,11 @@ void query_binned_index(const std::string& compressed_filename, VcfCoordinateQue
         debugf("Failed to open index file: %s\n", index_filename.c_str());
         return;
     }
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("file_open time: %lu\n", duration.count());
+    #endif
 
     debugf("Parsing metadata lines and header line\n");
     VcfCompressionSchema schema;
@@ -814,6 +828,7 @@ void query_binned_index(const std::string& compressed_filename, VcfCoordinateQue
     memset(&start_entry, 0, sizeof(start_entry));
 
     reference_name_map ref_name_map;
+
     uint8_t query_reference_name_idx = ref_name_map.reference_to_int(query.get_reference_name());
 
     // Find bin before the first bin start that matches the query
@@ -825,6 +840,9 @@ void query_binned_index(const std::string& compressed_filename, VcfCoordinateQue
     };
     enum query_state current_state = query_state::BEFORE_QUERY;
     int bytes_read;
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    #endif
     while (true) {
         size_t current_entry_address = tellfd(index_fd);
         if (read_index_entry(index_fd, &entry, &bytes_read) != 0) {
@@ -866,6 +884,11 @@ void query_binned_index(const std::string& compressed_filename, VcfCoordinateQue
             break;
         }
     }
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("index_search time: %lu\n", duration.count());
+    #endif
 
     debugf("query start_entry_address = %ld\n", start_entry_address);
     #ifdef DEBUG
@@ -873,7 +896,11 @@ void query_binned_index(const std::string& compressed_filename, VcfCoordinateQue
     debugf("bin_idx = %d\n", bin_idx);
     #endif
     string_t linebuf;
-    string_reserve(&linebuf, 2048);
+    string_reserve(&linebuf, 4 * 4096);
+
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    #endif
 
     if (at_least_one_entry) {
         debugf("entry reference_name_idx = %u, position = %u, byte_offset = %lu\n",
@@ -931,6 +958,12 @@ void query_binned_index(const std::string& compressed_filename, VcfCoordinateQue
     } else {
         debugf("Index was empty\n");
     }
+
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("decompress_iteration time: %lu\n", duration.count());
+    #endif
 
     free(linebuf.buf);
     close(index_fd);

@@ -600,89 +600,6 @@ int decompress2_data_line_fd2(
     read_compressed_line_length_headers(input_fd, &line_length_headers);
     line_byte_count += compressed_line_length_headers_size;
 
-    // interpret first 1 byte as a skip flag, then up to 3 additional bytes
-    // if (read(input_fd, &b, 1) <= 0) {
-    //     debugf("%s, no data in input_fstream\n", __FUNCTION__);
-    //     return -1;
-    // }
-    // line_byte_count++;
-
-    // // read the line length header
-    // uint8_t line_length_bytes[4] = {b, 0, 0, 0};
-    // LineLengthHeader line_length_header;
-
-    // #ifdef DEBUG
-    // start = std::chrono::steady_clock::now();
-    // #endif
-    // line_length_header.deserialize(line_length_bytes);
-    // #ifdef DEBUG
-    // end = std::chrono::steady_clock::now();
-    // duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    // debugf("LineLengthHeader.deserialize time: %lu\n", duration.count());
-    // #endif
-
-    // uint8_t extension_count = line_length_header.extension_count;
-    // debugf("Line length extension count: %u\n", extension_count);
-    // for (uint8_t i = 1; i <= extension_count; i++) {
-    //     //char db;
-    //     if (read(input_fd, &b, 1) <= 0) {
-    //         debugf("%s, no data in input_fstream\n", __FUNCTION__);
-    //         return -1;
-    //     }
-    //     line_length_bytes[i] = b;
-    // }
-    // line_byte_count += extension_count;
-
-    // #ifdef DEBUG
-    // start = std::chrono::steady_clock::now();
-    // #endif
-    // line_length_header.deserialize(line_length_bytes);
-    // #ifdef DEBUG
-    // end = std::chrono::steady_clock::now();
-    // duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    // debugf("LineLengthHeader.deserialize time: %lu\n", duration.count());
-    // #endif
-
-
-    // // read the required column skip length
-    // if (read(input_fd, &b, 1) <= 0) {
-    //     debugf("%s, no data in input_fstream\n", __FUNCTION__);
-    //     return -1;
-    // }
-    // line_byte_count++;
-    // uint8_t required_length_bytes[4] = {b, 0, 0, 0};
-    // LineLengthHeader required_length_header;
-
-    // #ifdef DEBUG
-    // start = std::chrono::steady_clock::now();
-    // #endif
-    // required_length_header.deserialize(required_length_bytes);
-    // #ifdef DEBUG
-    // end = std::chrono::steady_clock::now();
-    // duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    // debugf("LineLengthHeader.deserialize time: %lu\n", duration.count());
-    // #endif
-
-    // uint8_t required_extension_count = required_length_header.extension_count;
-    // for (uint8_t i = 0; i < required_extension_count; i++) {
-    //     if (read(input_fd, &b, 1) <= 0) {
-    //         debugf("%s, no data in input_fstream\n", __FUNCTION__);
-    //         return -1;
-    //     }
-    //     required_length_bytes[i+1] = b;
-    // }
-    // line_byte_count += required_extension_count;
-    // debugf("Deserializing required length header\n");
-    // #ifdef DEBUG
-    // start = std::chrono::steady_clock::now();
-    // #endif
-    // required_length_header.deserialize(required_length_bytes);
-    // #ifdef DEBUG
-    // end = std::chrono::steady_clock::now();
-    // duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    // debugf("LineLengthHeader.deserialize time: %lu\n", duration.count());
-    // #endif
-
     uint32_t required_length = line_length_headers.required_columns_length;
     debugf("Skipping %u bytes for required columns section\n", required_length);
 
@@ -857,6 +774,16 @@ int decompress2_metadata_headers_fd(
         int input_fd,
         std::vector<std::string>& output_vector,
         VcfCompressionSchema& output_schema) {
+    #ifdef TIMING
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    #endif
+
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    #endif
+
     // decompress all metadata and header lines
     bool got_meta = false, got_header = false;
     //int i1, i2;
@@ -919,15 +846,13 @@ int decompress2_metadata_headers_fd(
 
         while (true) {
             char c3;
-            if (read(input_fd, &c3, 1) == 0) {
-                debugf("No data lines were in the file\n");
-            }
-            if (c3 == '\n') {
+            if (read(input_fd, &c3, 1) <= 0) {
+                throw VcfValidationError("Failed to read the rest of the metadata or header row!");
+            } else if (c3 == '\n') {
                 // linebuf.push_back('\n');
                 string_appendc(&linebuf, '\n');
                 break;
-            }
-            if (c3 == '\t') {
+            } else if (got_header && c3 == '\t') { // got_header is only true once we are parsing a TSV header line
                 tab_count++;
                 if (tab_count > VCF_REQUIRED_COL_COUNT) {
                     output_schema.sample_count++;
@@ -942,28 +867,27 @@ int decompress2_metadata_headers_fd(
     }
     debugf("Line counts: metadata = %ld, header = %ld\n", meta_count, header_count);
     debugf("Sample count: %ld\n", output_schema.sample_count);
-
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("decompress2_metadata_headers_fd time: %lu\n", duration.count());
+    #endif
     return 0;
 }
 
 
 int decompress2_fd(const std::string& input_filename, const std::string& output_filename) {
     debugf("Decompressing %s to %s\n", input_filename.c_str(), output_filename.c_str());
-    // std::ifstream input_fstream(input_filename);
-    // std::ofstream output_fstream(output_filename);
     int input_fd = open(input_filename.c_str(), O_RDONLY);
     int output_fd = open(output_filename.c_str(), O_CREAT | O_TRUNC | O_WRONLY, DEFAULT_FILE_CREATE_MODE);
     VcfCompressionSchema schema;
-    //debugf("Parsing metadata lines and header line\n");
 
     std::vector<std::string> meta_header_lines;
     meta_header_lines.reserve(256);
-    //const char newline = '\n';
     decompress2_metadata_headers_fd(input_fd, meta_header_lines, schema);
     for (size_t i = 0; i < meta_header_lines.size(); i++) {
         // these lines still have the newline char included
         std::string& line = meta_header_lines.at(i);
-        // output_fstream.write(line.c_str(), line.size());
         write(output_fd, line.c_str(), line.size());
     }
     size_t variant_line_count = 0;

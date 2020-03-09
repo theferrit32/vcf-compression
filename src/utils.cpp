@@ -8,6 +8,7 @@ const std::string GT_00("0|0");
 const std::string GT_01("0|1");
 const std::string GT_10("1|0");
 const std::string GT_11("1|1");
+
 const int eof = std::char_traits<char>::eof();
 size_t compressed_line_length_headers_size =
     sizeof(uint32_t) + sizeof(uint32_t);

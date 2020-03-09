@@ -77,6 +77,13 @@ int string_appends(string_t *str, const char *c) {
     return 0;
 }
 
+// /**
+//  * Returns negative number on error, 0 on success.
+//  */
+// int string_appends(string_t *str, string_t *ap) {
+
+// }
+
 /**
  * str.size should be checked before calling this. Calling
  * this on an empty string returns 0;
@@ -91,6 +98,11 @@ char string_pop(string_t *str) {
     return 0;
 }
 
+/**
+ * Sets the string size to 0.
+ *
+ * NOTE: does not erase all memory contents.
+ */
 void string_clear(string_t *str) {
     // memset(str->buf, 0, str->size);
     str->size = 0;
