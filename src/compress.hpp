@@ -22,15 +22,25 @@ int decompress2_metadata_headers_fd(
         std::vector<std::string>& output_vector,
         VcfCompressionSchema& output_schema);
 int read_compressed_line_length_headers(int input_fd, struct compressed_line_length_headers *length_headers);
+int decompress2_data_line_fd2_string(
+        int input_fd,
+        const VcfCompressionSchema& schema,
+        std::string& linebuf,
+        size_t *compressed_line_length);
 int decompress2_data_line_fd2(
         int input_fd,
         const VcfCompressionSchema& schema,
         string_t *linebuf,
         size_t *compressed_line_length);
-int decompress2_data_line(
-        std::ifstream& input_fstream,
+int decompress2_data_line_FILE(
+        int input_fd,
         const VcfCompressionSchema& schema,
         std::string& linebuf,
         size_t *compressed_line_length);
+// int decompress2_data_line(
+//         std::ifstream& input_fstream,
+//         const VcfCompressionSchema& schema,
+//         std::string& linebuf,
+//         size_t *compressed_line_length);
 
 #endif

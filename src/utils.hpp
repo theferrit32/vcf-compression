@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <chrono>
 #include <sstream>
 #include <stdarg.h>
 #include <string.h>
@@ -195,6 +196,16 @@ public:
     }
 
     void deserialize(uint8_t in[4]) {
+        // #ifdef TIMING
+        // std::chrono::time_point<std::chrono::steady_clock> start;
+        // std::chrono::time_point<std::chrono::steady_clock> end;
+        // std::chrono::nanoseconds duration;
+        // #endif
+
+        // #ifdef TIMING
+        // start = std::chrono::steady_clock::now();
+        // #endif
+
         debugf("%s input bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n", __FUNCTION__, in[0], in[1], in[2], in[3]);
         this->extension_count = (in[0] >> 6) & 0x03;
         if (this->extension_count != 3) {
@@ -225,6 +236,12 @@ public:
             | ((this->length_bytes[2] << 8) /*& (0xFF << 8)*/)
             | ((this->length_bytes[3] << 0) /*& (0xFF << 0)*/);
         debugf("length = %u, 0x%08X\n", length, length);
+
+        // #ifdef TIMING
+        // end = std::chrono::steady_clock::now();
+        // duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+        // printf("LineLengthHeader.deserialize time: %lu\n", duration.count());
+        // #endif
 
         // debugf("%s %02X %02X %02X %02X extension_count = %u, length = %u, bytes %02X %02X %02X %02X, bin = %s\n",
         //     __FUNCTION__, in[0], in[1], in[2], in[3],

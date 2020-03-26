@@ -5,12 +5,14 @@ SOURCE = src/main.cpp src/utils.cpp \
 	src/string_t.c src/split_iterator.cpp
 
 
-default: main
+default: debug
 
-all: main release timing
+all: debug release timing
 
-main: $(SOURCE)
-	g++ $(CPP_FLAGS) -DDEBUG -o $@ $^
+debug: main_debug
+
+main_debug: $(SOURCE)
+	g++ $(CPP_FLAGS) -DDEBUG -DTIMING -o $@ $^
 
 release: main_release
 
@@ -23,4 +25,4 @@ main_timing: $(SOURCE)
 	g++ $(CPP_FLAGS) -O3 -DTIMING -o $@ $^
 
 clean:
-	rm -f main main_release main_timing
+	rm -f main main_debug main_release main_timing
