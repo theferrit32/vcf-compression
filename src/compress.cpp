@@ -3,6 +3,7 @@
 #include "compress.hpp"
 
 int compress_data_line(const std::string& line, const VcfCompressionSchema& schema, std::vector<byte_t>& byte_vec, bool add_newline) {
+    // Potentially use SplitIterator, might have better performance.
     std::vector<std::string> terms = split_string(line, "\t");
     const size_t terms_size = terms.size();
     if (terms_size < VCF_REQUIRED_COL_COUNT) {
@@ -256,6 +257,7 @@ int compress(const std::string& input_filename, const std::string& output_filena
 }
 
 
+
 /**
  * Read the line length headers from the start of a compressed data line, store in `length_headers`.
  *
@@ -265,7 +267,79 @@ int compress(const std::string& input_filename, const std::string& output_filena
  *
  * If negative, is the error return status from read(2).
  */
-int read_compressed_line_length_headers(int input_fd, struct compressed_line_length_headers *length_headers) {
+int read_compressed_line_length_headers(FILE *input_file, struct compressed_line_length_headers *length_headers) {
+    int status;
+    // int total_bytes = 0;
+
+    #ifdef TIMING
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    #endif
+
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    #endif
+
+    uint8_t line_length_header_bytes[8] = {0,0,0,0,0,0,0,0};
+    // status = read(input_fd, &line_length_header_bytes, 8);
+    status = fread(&line_length_header_bytes, 1, 8, input_file);
+    if (status != 8) {
+        if (status < 0) {
+            return status;
+        } else if (status == 0) {
+            debugf("Finished querying file\n");
+            return 0;
+        } else {
+            return status;
+        }
+    }
+
+    uint8_t *required_columns_length_header_bytes = line_length_header_bytes + 4;
+
+    debugf("line_length_header_bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
+            line_length_header_bytes[0], line_length_header_bytes[1],
+            line_length_header_bytes[2], line_length_header_bytes[3]);
+
+    debugf("required_columns_length_header_bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
+            required_columns_length_header_bytes[0], required_columns_length_header_bytes[1],
+            required_columns_length_header_bytes[2], required_columns_length_header_bytes[3]);
+
+    int read_bytes = 4 + 4; // length headers
+
+    debugf("After length headers, stream positioned so next byte is at position %ld (0x%08lx)\n",
+            ftell(input_file),
+            ftell(input_file));
+
+    LineLengthHeader line_length_header;
+    // line_length_header.set_extension_count(3); // TODO interpret
+
+    line_length_header.deserialize(line_length_header_bytes);
+    length_headers->line_length = line_length_header.length;
+
+    line_length_header.deserialize(required_columns_length_header_bytes);
+    length_headers->required_columns_length = line_length_header.length;
+
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("TIMING read_compressed_line_length_headers: %lu\n", duration.count());
+    #endif
+
+    return read_bytes;
+}
+
+
+/**
+ * Read the line length headers from the start of a compressed data line, store in `length_headers`.
+ *
+ * On success returns a positive integer indicating the number of bytes read.
+ *
+ * If EOF, returns 0.
+ *
+ * If negative, is the error return status from read(2).
+ */
+int read_compressed_line_length_headers_fd(int input_fd, struct compressed_line_length_headers *length_headers) {
     int status;
     // int total_bytes = 0;
 
@@ -294,35 +368,9 @@ int read_compressed_line_length_headers(int input_fd, struct compressed_line_len
 
     uint8_t *required_columns_length_header_bytes = line_length_header_bytes + 4;
 
-    // uint8_t line_length_header_bytes[4] = {0,0,0,0};
-    // status = read(input_fd, &line_length_header_bytes, 4);
-    // if (status != 4) {
-    //     if (status < 0) {
-    //         return status;
-    //         // throw std::runtime_error("Error reading from file");
-    //     } else if (status == 0) {
-    //         debugf("Finished querying file\n");
-    //         return 0;
-    //     } else if (status < 4) {
-    //         return status;
-    //         // throw std::runtime_error(string_format("Only read %d bytes, expected 4", status));
-    //     }
-    // }
-
     debugf("line_length_header_bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
             line_length_header_bytes[0], line_length_header_bytes[1],
             line_length_header_bytes[2], line_length_header_bytes[3]);
-
-    // uint8_t required_columns_length_header_bytes[4] = {0,0,0,0};
-    // status = read(input_fd, &required_columns_length_header_bytes, 4);
-    // if (status != 4) {
-    //     if (status < 0) {
-    //         return status;
-    //     } else if (status < 4) {
-    //         // throw std::runtime_error(string_format("Only read %d bytes, expected 4", status));
-    //         return 4 + status;
-    //     }
-    // }
 
     debugf("required_columns_length_header_bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
             required_columns_length_header_bytes[0], required_columns_length_header_bytes[1],
@@ -346,436 +394,11 @@ int read_compressed_line_length_headers(int input_fd, struct compressed_line_len
     #ifdef TIMING
     end = std::chrono::steady_clock::now();
     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    printf("read_compressed_line_length_headers time: %lu\n", duration.count());
+    printf("TIMING read_compressed_line_length_headers: %lu\n", duration.count());
     #endif
 
     return read_bytes;
 }
-
-
-int decompress2_data_line(
-        std::ifstream& input_fstream,
-        const VcfCompressionSchema& schema,
-        // std::string& linebuf,
-        string_t *linebuf,
-        size_t *compressed_line_length) {
-    debugf("%s decompressing line, expecting %lu samples\n", __FUNCTION__, schema.sample_count);
-    // decompress a single variant line
-    int ib;
-    unsigned char b;
-
-    // keep track of how many columns we've seen
-    size_t line_byte_count = 0;
-    size_t line_tab_count = 0;
-    size_t line_sample_count = 0;
-
-    // interpret first 1 byte as a skip flag, then up to 3 additional bytes
-    ib = input_fstream.get();
-    debugf("ib = 0x%08X\n", ib);
-    if (ib == eof) {
-        debugf("%s, no data in input_fstream\n", __FUNCTION__);
-        return -1;
-    }
-    line_byte_count++;
-    b = 0xFF & ib;
-
-    // read the line length header
-    uint8_t line_length_bytes[4] = {b, 0, 0, 0};
-    LineLengthHeader line_length_header;
-    line_length_header.deserialize(line_length_bytes);
-    uint8_t extension_count = line_length_header.extension_count;
-    debugf("Line length extension count: %u\n", extension_count);
-    for (uint8_t i = 1; i <= extension_count; i++) {
-        int ib = input_fstream.get();
-        if (ib == eof) {
-            debugf("%s, no data in input_fstream\n", __FUNCTION__);
-            return -1;
-        }
-        // line_byte_count++;
-        line_length_bytes[i] = 0xFF & ib;
-    }
-    line_byte_count += extension_count;
-    line_length_header.deserialize(line_length_bytes);
-
-
-    // read the required column skip length
-    ib = input_fstream.get();
-    if (ib == eof) {
-        debugf("%s, no data in input_fstream\n", __FUNCTION__);
-        return -1;
-    }
-    line_byte_count++;
-    b = 0xFF & ib;
-    uint8_t required_length_bytes[4] = {b, 0, 0, 0};
-    LineLengthHeader required_length_header;
-    required_length_header.deserialize(required_length_bytes);
-    uint8_t required_extension_count = required_length_header.extension_count;
-    for (uint8_t i = 0; i < required_extension_count; i++) {
-        int ib = input_fstream.get();
-        if (ib == eof) {
-            debugf("%s, no data in input_fstream\n", __FUNCTION__);
-            return -1;
-        }
-        //line_byte_count++;
-        required_length_bytes[i+1] = 0xFF & ib;
-    }
-    line_byte_count += required_extension_count;
-    debugf("Deserializing required length header\n");
-    required_length_header.deserialize(required_length_bytes);
-    uint32_t required_length = required_length_header.length;
-    debugf("Skipping %u bytes for required columns section\n", required_length);
-
-    for (size_t i = 0; i < required_length; i++) {
-        input_fstream.read((char*)&b, 1);
-        char cb = reinterpret_cast<char&>(b);
-        // linebuf.push_back(cb);
-        string_appendc(linebuf, cb);
-        if (cb == '\t') {
-            line_tab_count++;
-        }
-    }
-    debugf("Finished reading required columns: %s\n", linebuf->buf);
-    line_byte_count += required_length;
-
-
-    // check to ensure we read in the appropriate number of uncompressed columns
-    // here it expects VCF_REQUIRED_COL_COUNT + 1 because it skips the format column as well
-    if (line_tab_count != VCF_REQUIRED_COL_COUNT + 1) {
-        if (line_tab_count == VCF_REQUIRED_COL_COUNT && schema.sample_count == 0) {
-            // do nothing
-        } else {
-            debugf("line_tab_count: %lu\n", line_tab_count);
-            throw VcfValidationError("Did not read all uncompressed columns");
-            return 0;
-        }
-    }
-
-    debugf("Reading sample columns\n");
-    // read the sample columns
-    while (line_sample_count < schema.sample_count) {
-        ib = input_fstream.peek();
-        b = 0xFF & ib;
-        //debugf("b: %02x\n", (unsigned char)b);
-
-        if (ib == eof /*|| (char)ib == '\n' || (char)ib == '\t'*/) {
-            std::ostringstream msg;
-            msg << "Missing samples, expected " << schema.sample_count
-                << ", received " << line_sample_count;
-            throw VcfValidationError(msg.str().c_str());
-        }
-        input_fstream.get(); // remove peeked char from stream
-        line_byte_count++;
-
-        if ((b & SAMPLE_MASK_00) == SAMPLE_MASKED_00) {
-            // is a 0|0 column
-            uint8_t count = (b & (~SAMPLE_MASK_00)) & 0xFF; // and with inverse of flag mask
-            uint8_t counter = count;
-            debugf("0|0 repeat count: %u\n", count);
-
-            while (counter--) {
-                // linebuf.append(GT_00.c_str());
-                // linebuf.append(tab);
-                string_appends(linebuf, GT_00.c_str());
-                string_appendc(linebuf, tab[0]);
-            }
-
-            // update line counts
-            line_tab_count += count;
-            line_sample_count += count;
-
-            // remove last tab if at end of line
-            if (line_sample_count >= schema.sample_count) {
-                // linebuf.pop_back();
-                string_pop(linebuf);
-                line_tab_count--;
-            }
-        } else if ((b & SAMPLE_MASK_UNCOMPRESSED) == SAMPLE_MASKED_UNCOMPRESSED) {
-            uint8_t uncompressed_count = b & (~SAMPLE_MASK_UNCOMPRESSED);
-            debugf("%u uncompressed columns follow\n", uncompressed_count);
-            // uncompressed columns follow
-            uint8_t ucounter = 0; // number of uncompressed columns
-            while (ucounter < uncompressed_count) {
-                input_fstream.read((char*)(&b), 1);
-                line_byte_count++;
-                // TODO handle newline ?
-                if (b == '\n') {
-                    // newline after uncompressed sample value
-                    ucounter++;
-                    line_sample_count++;
-                    if (ucounter != uncompressed_count) {
-                        throw VcfValidationError("Reached end of line before reading all decompressed columns");
-                    }
-                    debugf("Putting 0x%02X back into input stream\n", b);
-                    input_fstream.putback(b);
-                }
-                else if (b == '\t') {
-                    // don't push tabs, handled outside if
-                    ucounter++;
-                    line_tab_count++;
-                    line_sample_count++;
-                    if (line_sample_count < schema.sample_count) {
-                        // if not the last term, include the tab
-                        // otherwise, the tab is handled outside the if
-                        // linebuf.push_back(b);
-                        string_appendc(linebuf, b);
-                    }
-                } else {
-                    // linebuf.push_back(b);
-                    string_appendc(linebuf, b);
-                }
-            }
-        } else {
-            // either 0|1, 1|0, or 1|1
-            byte_t masked = b & SAMPLE_MASK_01_10_11;
-            const std::string *sample_str = NULL;
-
-            if (masked == SAMPLE_MASKED_01) {
-                sample_str = &GT_01;
-            } else if (masked == SAMPLE_MASKED_10) {
-                sample_str = &GT_10;
-            } else if (masked == SAMPLE_MASKED_11) {
-                sample_str = &GT_11;
-            } else {
-                throw std::runtime_error("Error during decompression of compressed file, unrecognized bitmask");
-            }
-
-            // write the sample GT and increment counters
-            uint8_t count = (b & (~SAMPLE_MASK_01_10_11)) & 0xFF;
-            debugf("Got %s, count: %u\n", sample_str->c_str(), count);
-            while (count--) {
-                // linebuf.append(*sample_str);
-                string_appends(linebuf, sample_str->c_str());
-                line_sample_count++;
-                if (line_sample_count < schema.sample_count /*input_fstream.peek() != '\n'*/) {
-                    // linebuf.append(tab);
-                    string_appendc(linebuf, tab[0]);
-                }
-                line_tab_count++;
-            }
-        } // end flag cases
-    } // end sample loop
-    debugf("Finished reading samples\n");
-
-    // make sure next byte is a newline
-    ib = input_fstream.get();
-    line_byte_count++;
-    if (ib == '\n') {
-        b = (char)ib;
-        // linebuf.push_back(b);
-        string_appendc(linebuf, b);
-    } else {
-        throw VcfValidationError("Sample line did not end in a newline\n");
-    }
-
-    *compressed_line_length = line_byte_count;
-
-    return 0;
-}
-
-
-/**
- * Reads from input_fstream to decompress one line from the vcfc file.
- * Schema must match the actual schema of the file.
- *
- * NOTE: Appends the decompressed line to linebuf. Usually caller
- * should send an empty linebuf.
- *
- * If linebuf needs to be reallocated to a larger buffer,
- * the value of linebuf and linebuf_capacity will be updated.
- *
- * Returns 0 on EOF, 1 on success, -1 on error.
- */
-// int decompress2_data_line_fd2(
-//         int input_fd,
-//         const VcfCompressionSchema& schema,
-//         string_t *linebuf,
-//         size_t *compressed_line_length) {
-//     debugf("%s decompressing line, expecting %lu samples\n", __FUNCTION__, schema.sample_count);
-//     // decompress a single variant line
-//     unsigned char b;
-//     #ifdef TIMING
-//     std::chrono::time_point<std::chrono::steady_clock> start;
-//     std::chrono::time_point<std::chrono::steady_clock> end;
-//     std::chrono::nanoseconds duration;
-//     #endif
-
-//     // keep track of how many columns we've seen
-//     size_t line_byte_count = 0;
-//     size_t line_tab_count = 0;
-//     size_t line_sample_count = 0;
-
-//     if (eof_fd(input_fd)) {
-//         debugf("%s, no data in input_fd\n", __FUNCTION__);
-//         return 0;
-//     }
-//     struct compressed_line_length_headers line_length_headers;
-//     memset(&line_length_headers, 0, sizeof(struct compressed_line_length_headers));
-
-//     read_compressed_line_length_headers(input_fd, &line_length_headers);
-//     line_byte_count += compressed_line_length_headers_size;
-
-//     uint32_t required_length = line_length_headers.required_columns_length;
-//     debugf("Skipping %u bytes for required columns section\n", required_length);
-
-//     for (size_t i = 0; i < required_length; i++) {
-//         char cb;
-//         if (read(input_fd, &cb, 1) <= 0) {
-//             throw std::runtime_error("fread error");
-//         }
-
-//         string_appendc(linebuf, cb);
-
-//         if (cb == '\t') {
-//             line_tab_count++;
-//         }
-//     }
-//     debugf("Finished reading required columns\n");
-//     line_byte_count += required_length;
-
-
-//     // check to ensure we read in the appropriate number of uncompressed columns
-//     // here it expects VCF_REQUIRED_COL_COUNT + 1 because it skips the format column as well
-//     if (line_tab_count != VCF_REQUIRED_COL_COUNT + 1) {
-//         if (line_tab_count == VCF_REQUIRED_COL_COUNT && schema.sample_count == 0) {
-//             // do nothing
-//         } else {
-//             debugf("line_tab_count: %lu\n", line_tab_count);
-//             throw VcfValidationError("Did not read all uncompressed columns");
-//             // return -1;
-//         }
-//     }
-
-//     #ifdef TIMING
-//     start = std::chrono::steady_clock::now();
-//     #endif
-
-//     debugf("Reading sample columns\n");
-//     // read the sample columns
-//     while (line_sample_count < schema.sample_count) {
-//         //debugf("Trying to read a sample column\n");
-//         if (read(input_fd, &b, 1) <= 0) {
-//             std::ostringstream msg;
-//             msg << "Missing samples, expected " << schema.sample_count
-//                 << ", received " << line_sample_count;
-//             throw VcfValidationError(msg.str().c_str());
-//         }
-//         line_byte_count++;
-
-//         if ((b & SAMPLE_MASK_00) == SAMPLE_MASKED_00) {
-//             // is a 0|0 column
-//             uint8_t count = (b & (~SAMPLE_MASK_00)) & 0xFF; // and with inverse of flag mask
-//             uint8_t counter = count;
-//             debugf("0|0 repeat count: %u\n", count);
-
-//             while (counter--) {
-//                 // linebuf.append(GT_00.c_str());
-//                 // linebuf.append(tab);
-//                 string_appends(linebuf, GT_00.c_str());
-//                 string_appends(linebuf, tab);
-//             }
-
-//             // update line counts
-//             line_tab_count += count;
-//             line_sample_count += count;
-
-//             // remove last tab if at end of line
-//             if (line_sample_count >= schema.sample_count) {
-//                 // linebuf.pop_back();
-//                 string_pop(linebuf);
-//                 line_tab_count--;
-//             }
-//         } else if ((b & SAMPLE_MASK_UNCOMPRESSED) == SAMPLE_MASKED_UNCOMPRESSED) {
-//             uint8_t uncompressed_count = b & (~SAMPLE_MASK_UNCOMPRESSED);
-//             debugf("%u uncompressed columns follow\n", uncompressed_count);
-//             // uncompressed columns follow
-//             uint8_t ucounter = 0; // number of uncompressed columns
-//             while (ucounter < uncompressed_count) {
-//                 if (read(input_fd, &b, 1) <= 0) {
-//                     throw std::runtime_error("Couldn't read from input_fd");
-//                 }
-//                 // fread(&b, sizeof(char), 1, input_stream);
-//                 line_byte_count++;
-//                 // TODO handle newline ?
-//                 if (b == '\n') {
-//                     // newline after uncompressed sample value
-//                     ucounter++;
-//                     line_sample_count++;
-//                     if (ucounter != uncompressed_count) {
-//                         throw VcfValidationError("Reached end of line before reading all decompressed columns");
-//                     }
-//                     // ending newline handled outside loop
-//                     debugf("got ending newline\n");
-//                     lseek(input_fd, -1, SEEK_CUR);
-//                 }
-//                 else if (b == '\t') {
-//                     // don't push tabs, handled outside if
-//                     ucounter++;
-//                     line_tab_count++;
-//                     line_sample_count++;
-//                     if (line_sample_count < schema.sample_count) {
-//                         // if not the last term, include the tab
-//                         // otherwise, the tab is handled outside the if
-//                         // linebuf.push_back(b);
-//                         string_appendc(linebuf, b);
-//                     }
-//                 } else {
-//                     // linebuf.push_back(b);
-//                     string_appendc(linebuf, b);
-//                 }
-//             }
-//         } else {
-//             // either 0|1, 1|0, or 1|1
-//             byte_t masked = b & SAMPLE_MASK_01_10_11;
-//             const std::string *sample_str = NULL;
-
-//             if (masked == SAMPLE_MASKED_01) {
-//                 sample_str = &GT_01;
-//             } else if (masked == SAMPLE_MASKED_10) {
-//                 sample_str = &GT_10;
-//             } else if (masked == SAMPLE_MASKED_11) {
-//                 sample_str = &GT_11;
-//             } else {
-//                 throw std::runtime_error("Error during decompression of compressed file, unrecognized bitmask");
-//             }
-
-//             // write the sample GT and increment counters
-//             uint8_t count = (b & (~SAMPLE_MASK_01_10_11)) & 0xFF;
-//             debugf("Got %s, count: %u\n", sample_str->c_str(), count);
-//             while (count--) {
-//                 // linebuf.append(*sample_str);
-//                 string_appends(linebuf, sample_str->c_str());
-//                 line_sample_count++;
-//                 if (line_sample_count < schema.sample_count /*input_fstream.peek() != '\n'*/) {
-//                     // linebuf.append(tab);
-//                     string_appendc(linebuf, tab[0]);
-//                 }
-//                 line_tab_count++;
-//             }
-//         } // end flag cases
-//     } // end sample loop
-//     debugf("Finished reading samples\n");
-
-
-//     #ifdef TIMING
-//     end = std::chrono::steady_clock::now();
-//     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-//     printf("decompress-sample-loop time: %lu\n", duration.count());
-//     #endif
-
-//     if (read(input_fd, &b, 1) <= 0) {
-//         throw std::runtime_error("Failed to read line ending");
-//     }
-//     if (b == '\n') {
-//         // linebuf.push_back('\n');
-//         string_appendc(linebuf, '\n');
-//     } else {
-//         throw VcfValidationError("Sample line did not end in a newline\n");
-//     }
-
-//     *compressed_line_length = line_byte_count;
-
-//     return 1;
-// }
 
 
 /**
@@ -828,7 +451,7 @@ const std::string get_or_set_decompressed_cache(
         #ifdef TIMING
         end = std::chrono::steady_clock::now();
         duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-        printf("get_or_set_decompressed_cache time: %lu\n", duration.count());
+        printf("TIMING get_or_set_decompressed_cache: %lu\n", duration.count());
         #endif
         return cache_line;
     }
@@ -842,270 +465,30 @@ const std::string get_or_set_decompressed_cache(
             #ifdef TIMING
             end = std::chrono::steady_clock::now();
             duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-            printf("get_or_set_decompressed_cache time: %lu\n", duration.count());
+            printf("TIMING get_or_set_decompressed_cache: %lu\n", duration.count());
             #endif
             return cache_line;
         } else {
             #ifdef TIMING
             end = std::chrono::steady_clock::now();
             duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-            printf("get_or_set_decompressed_cache time: %lu\n", duration.count());
+            printf("TIMING get_or_set_decompressed_cache: %lu\n", duration.count());
             #endif
             return run_vector[run_length];
         }
     }
-    // std::string& val = decompressed_cache[sample_value][run_length];
-    // return val;
 }
 
-/**
- * Reads from input_fstream to decompress one line from the vcfc file.
- * Schema must match the actual schema of the file.
- *
- * NOTE: Appends the decompressed line to linebuf. Usually caller
- * should send an empty linebuf.
- *
- * If linebuf needs to be reallocated to a larger buffer,
- * the value of linebuf and linebuf_capacity will be updated.
- *
- * Returns 0 on EOF, 1 on success, -1 on error.
- */
-int decompress2_data_line_fd2_string(
+
+int decompress2_data_line_FILEwrapper(
         int input_fd,
         const VcfCompressionSchema& schema,
         std::string& linebuf,
         size_t *compressed_line_length) {
     debugf("%s decompressing line, expecting %lu samples\n", __FUNCTION__, schema.sample_count);
     // decompress a single variant line
-    unsigned char b;
-    int status;
-    #ifdef TIMING
-    std::chrono::time_point<std::chrono::steady_clock> start;
-    std::chrono::time_point<std::chrono::steady_clock> end;
-    std::chrono::nanoseconds duration;
-
-    std::chrono::time_point<std::chrono::steady_clock> start2;
-    std::chrono::time_point<std::chrono::steady_clock> end2;
-    #endif
-
-    #ifdef TIMING
-    start = std::chrono::steady_clock::now();
-    #endif
-
-    // keep track of how many columns we've seen
-    size_t line_byte_count = 0;
-    size_t line_tab_count = 0;
-    size_t line_sample_count = 0;
-
-    if (eof_fd(input_fd)) {
-        debugf("%s, no data in input_fd\n", __FUNCTION__);
-        return 0;
-    }
-    struct compressed_line_length_headers line_length_headers;
-    memset(&line_length_headers, 0, sizeof(struct compressed_line_length_headers));
-
-    read_compressed_line_length_headers(input_fd, &line_length_headers);
-    line_byte_count += compressed_line_length_headers_size;
-
-    uint32_t required_length = line_length_headers.required_columns_length;
-    debugf("Skipping %u bytes for required columns section\n", required_length);
-
-    #ifdef TIMING
-    start2 = std::chrono::steady_clock::now();
-    #endif
-    // 19 seconds
-    // for (size_t i = 0; i < required_length; i++) {
-    //     char cb;
-    //     if (read(input_fd, &cb, 1) <= 0) {
-    //         throw std::runtime_error("fread error");
-    //     }
-
-    //     // string_appendc(linebuf, cb);
-    //     linebuf.push_back(cb);
-
-    //     if (cb == '\t') {
-    //         line_tab_count++;
-    //     }
-    // }
-
-    // 175 milliseconds
-    // read the skipped bytes
-    char *buf = (char*) calloc(required_length + 1, sizeof(char));
-    debugf("Reading required columns\n");
-    ssize_t read_n = read(input_fd, buf, (size_t)required_length);
-    if (read_n <= 0) {
-        throw std::runtime_error("error reading required columns");
-    }
-    if (read_n < required_length) {
-        debugf("While reading required columns expected %u bytes but got %ld\n", required_length, read_n);
-        throw std::runtime_error("");
-    }
-
-    // count the tabs in the read string
-    debugf("Counting tabs\n");
-    for (uint32_t i = 0; i < required_length; i++) {
-        if (buf[i] == '\t') {
-            line_tab_count++;
-        }
-    }
-    linebuf.append(buf);
-
-    #ifdef TIMING
-    end2 = std::chrono::steady_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end2 - start2);
-    printf("skipping-required-columns time: %lu\n", duration.count());
-    #endif
-    debugf("Finished reading required columns\n");
-    line_byte_count += required_length;
-
-
-    // check to ensure we read in the appropriate number of uncompressed columns
-    // here it expects VCF_REQUIRED_COL_COUNT + 1 because it skips the format column as well
-    if (line_tab_count != VCF_REQUIRED_COL_COUNT + 1) {
-        if (line_tab_count == VCF_REQUIRED_COL_COUNT && schema.sample_count == 0) {
-            // do nothing
-        } else {
-            debugf("line_tab_count: %lu\n", line_tab_count);
-            throw VcfValidationError("Did not read all uncompressed columns");
-            // return -1;
-        }
-    }
-
-    debugf("Reading sample columns\n");
-    // read the sample columns
-    while (line_sample_count < schema.sample_count) {
-        //debugf("Trying to read a sample column\n");
-        if (read(input_fd, &b, 1) <= 0) {
-            std::ostringstream msg;
-            msg << "Missing samples, expected " << schema.sample_count
-                << ", received " << line_sample_count;
-            throw VcfValidationError(msg.str().c_str());
-        }
-        line_byte_count++;
-
-        if ((b & SAMPLE_MASK_00) == SAMPLE_MASKED_00) {
-            // is a 0|0 column
-            uint8_t count = (b & (~SAMPLE_MASK_00)) & 0xFF; // and with inverse of flag mask
-            // uint8_t counter = count;
-            debugf("0|0 repeat count: %u\n", count);
-
-            const std::string& cache_line = get_or_set_decompressed_cache(GT_00, count);
-            linebuf.append(cache_line);
-
-            // update line counts
-            line_tab_count += count;
-            line_sample_count += count;
-
-            // remove last tab if at end of line
-            if (line_sample_count >= schema.sample_count) {
-                linebuf.pop_back();
-                // string_pop(linebuf);
-                line_tab_count--;
-            }
-        } else if ((b & SAMPLE_MASK_UNCOMPRESSED) == SAMPLE_MASKED_UNCOMPRESSED) {
-            uint8_t uncompressed_count = b & (~SAMPLE_MASK_UNCOMPRESSED);
-            debugf("%u uncompressed columns follow\n", uncompressed_count);
-            // uncompressed columns follow
-            uint8_t ucounter = 0; // number of uncompressed columns
-            while (ucounter < uncompressed_count) {
-                if (read(input_fd, &b, 1) <= 0) {
-                    throw std::runtime_error("Couldn't read from input_fd");
-                }
-                // fread(&b, sizeof(char), 1, input_stream);
-                line_byte_count++;
-                // TODO handle newline ?
-                if (b == '\n') {
-                    // newline after uncompressed sample value
-                    ucounter++;
-                    line_sample_count++;
-                    if (ucounter != uncompressed_count) {
-                        throw VcfValidationError("Reached end of line before reading all decompressed columns");
-                    }
-                    // ending newline handled outside loop
-                    debugf("got ending newline\n");
-                    lseek(input_fd, -1, SEEK_CUR);
-                }
-                else if (b == '\t') {
-                    // don't push tabs, handled outside if
-                    ucounter++;
-                    line_tab_count++;
-                    line_sample_count++;
-                    if (line_sample_count < schema.sample_count) {
-                        // if not the last term, include the tab
-                        // otherwise, the tab is handled outside the if
-                        linebuf.push_back(b);
-                        // string_appendc(linebuf, b);
-                    }
-                } else {
-                    linebuf.push_back(b);
-                    // string_appendc(linebuf, b);
-                }
-            }
-        } else {
-            // either 0|1, 1|0, or 1|1
-            byte_t masked = b & SAMPLE_MASK_01_10_11;
-            const std::string *sample_str = NULL;
-
-            if (masked == SAMPLE_MASKED_01) {
-                sample_str = &GT_01;
-            } else if (masked == SAMPLE_MASKED_10) {
-                sample_str = &GT_10;
-            } else if (masked == SAMPLE_MASKED_11) {
-                sample_str = &GT_11;
-            } else {
-                throw std::runtime_error("Error during decompression of compressed file, unrecognized bitmask");
-            }
-
-            // write the sample GT and increment counters
-            uint8_t count = (b & (~SAMPLE_MASK_01_10_11)) & 0xFF;
-            debugf("Got %s, count: %u\n", sample_str->c_str(), count);
-            while (count--) {
-                linebuf.append(*sample_str);
-                // string_appends(linebuf, sample_str->c_str());
-                line_sample_count++;
-                if (line_sample_count < schema.sample_count /*input_fstream.peek() != '\n'*/) {
-                    linebuf.push_back(tab[0]);
-                    // string_appendc(linebuf, tab[0]);
-                }
-                line_tab_count++;
-            }
-        } // end flag cases
-    } // end sample loop
-    debugf("Finished reading samples\n");
-
-
-
-
-    if (read(input_fd, &b, 1) <= 0) {
-        throw std::runtime_error("Failed to read line ending");
-    }
-    if (b == '\n') {
-        linebuf.push_back(b);
-        // string_appendc(linebuf, '\n');
-    } else {
-        throw VcfValidationError("Sample line did not end in a newline\n");
-    }
-
-    *compressed_line_length = line_byte_count;
-
-    #ifdef TIMING
-    end = std::chrono::steady_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    printf("decompress2_data_line_fd2_string time: %lu\n", duration.count());
-    #endif
-    return 1;
-}
-
-
-int decompress2_data_line_FILE(
-        int input_fd,
-        const VcfCompressionSchema& schema,
-        std::string& linebuf,
-        size_t *compressed_line_length) {
-    debugf("%s decompressing line, expecting %lu samples\n", __FUNCTION__, schema.sample_count);
-    // decompress a single variant line
-    unsigned char b;
-    int status;
+    // unsigned char b;
+    // int status;
     #ifdef TIMING
     std::chrono::time_point<std::chrono::steady_clock> start;
     std::chrono::time_point<std::chrono::steady_clock> end;
@@ -1124,20 +507,275 @@ int decompress2_data_line_FILE(
     int input_fd_dup = dup(input_fd);
     FILE *input_file = fdopen(input_fd_dup, "r");
 
+    int status = decompress2_data_line(input_file, schema, linebuf, compressed_line_length);
+
+    // // keep track of how many columns we've seen
+    // size_t line_byte_count = 0;
+    // size_t line_tab_count = 0;
+    // size_t line_sample_count = 0;
+
+    // if (eof_fd(input_fd)) {
+    //     debugf("%s, no data in input_fd\n", __FUNCTION__);
+    //     return 0;
+    // }
+    // struct compressed_line_length_headers line_length_headers;
+    // memset(&line_length_headers, 0, sizeof(struct compressed_line_length_headers));
+
+    // read_compressed_line_length_headers(input_fd, &line_length_headers);
+    // line_byte_count += compressed_line_length_headers_size;
+
+    // uint32_t required_length = line_length_headers.required_columns_length;
+    // debugf("Skipping %u bytes for required columns section\n", required_length);
+
+    // #ifdef TIMING
+    // start2 = std::chrono::steady_clock::now();
+    // #endif
+
+    // // read the skipped bytes
+    // char *buf = (char*) calloc(required_length + 1, sizeof(char));
+    // debugf("Reading required columns\n");
+    // // ssize_t read_n = read(input_fd, buf, (size_t)required_length);
+    // size_t read_n = fread(buf, sizeof(char), required_length, input_file);
+    // if (read_n <= 0) {
+    //     throw std::runtime_error("error reading required columns");
+    // }
+    // if (read_n < required_length) {
+    //     debugf("While reading required columns expected %u bytes but got %ld\n", required_length, read_n);
+    //     throw std::runtime_error("");
+    // }
+
+    // // count the tabs in the read string
+    // debugf("Counting tabs\n");
+    // for (uint32_t i = 0; i < required_length; i++) {
+    //     if (buf[i] == '\t') {
+    //         line_tab_count++;
+    //     }
+    // }
+    // linebuf.append(buf);
+
+    // #ifdef TIMING
+    // end2 = std::chrono::steady_clock::now();
+    // duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end2 - start2);
+    // printf("skipping-required-columns time: %lu\n", duration.count());
+    // #endif
+    // debugf("Finished reading required columns\n");
+    // line_byte_count += required_length;
+
+
+    // // check to ensure we read in the appropriate number of uncompressed columns
+    // // here it expects VCF_REQUIRED_COL_COUNT + 1 because it skips the format column as well
+    // if (line_tab_count != VCF_REQUIRED_COL_COUNT + 1) {
+    //     if (line_tab_count == VCF_REQUIRED_COL_COUNT && schema.sample_count == 0) {
+    //         // do nothing
+    //     } else {
+    //         debugf("line_tab_count: %lu\n", line_tab_count);
+    //         throw VcfValidationError("Did not read all uncompressed columns");
+    //         // return -1;
+    //     }
+    // }
+
+    // debugf("Reading sample columns\n");
+    // // read the sample columns
+    // while (line_sample_count < schema.sample_count) {
+    //     //debugf("Trying to read a sample column\n");
+    //     // if (read(input_fd, &b, 1) <= 0) {
+    //     if (fread(&b, 1, 1, input_file) < 1) {
+    //         std::ostringstream msg;
+    //         msg << "Missing samples, expected " << schema.sample_count
+    //             << ", received " << line_sample_count;
+    //         throw VcfValidationError(msg.str().c_str());
+    //     }
+    //     line_byte_count++;
+
+    //     if ((b & SAMPLE_MASK_00) == SAMPLE_MASKED_00) {
+    //         // is a 0|0 column
+    //         uint8_t count = (b & (~SAMPLE_MASK_00)) & 0xFF; // and with inverse of flag mask
+    //         debugf("0|0 repeat count: %u\n", count);
+
+    //         // uint8_t counter = count;
+    //         // while (counter--) {
+    //         //     linebuf.append(GT_00);
+    //         //     linebuf.append(tab);
+    //         //     // string_appends(linebuf, GT_00.c_str());
+    //         //     // string_appendc(linebuf, tab[0]);
+    //         // }
+
+
+    //         const std::string& cache_line = get_or_set_decompressed_cache(GT_00, count);
+    //         linebuf.append(cache_line);
+
+    //         // update line counts
+    //         line_tab_count += count;
+    //         line_sample_count += count;
+
+    //         // remove last tab if at end of line
+    //         if (line_sample_count >= schema.sample_count) {
+    //             linebuf.pop_back();
+    //             // string_pop(linebuf);
+    //             line_tab_count--;
+    //         }
+    //     } else if ((b & SAMPLE_MASK_UNCOMPRESSED) == SAMPLE_MASKED_UNCOMPRESSED) {
+    //         uint8_t uncompressed_count = b & (~SAMPLE_MASK_UNCOMPRESSED);
+    //         debugf("%u uncompressed columns follow\n", uncompressed_count);
+    //         // uncompressed columns follow
+    //         uint8_t ucounter = 0; // number of uncompressed columns
+    //         while (ucounter < uncompressed_count) {
+    //             // if (read(input_fd, &b, 1) <= 0) {
+    //             if (fread(&b, 1, 1, input_file) < 1) {
+    //                 throw std::runtime_error("Couldn't read from input_fd");
+    //             }
+    //             // fread(&b, sizeof(char), 1, input_stream);
+    //             line_byte_count++;
+    //             // TODO handle newline ?
+    //             if (b == '\n') {
+    //                 // newline after uncompressed sample value
+    //                 ucounter++;
+    //                 line_sample_count++;
+    //                 if (ucounter != uncompressed_count) {
+    //                     throw VcfValidationError("Reached end of line before reading all decompressed columns");
+    //                 }
+    //                 // ending newline handled outside loop
+    //                 debugf("got ending newline\n");
+    //                 // lseek(input_fd, -1, SEEK_CUR);
+    //                 fseek(input_file, -1, SEEK_CUR);
+    //             }
+    //             else if (b == '\t') {
+    //                 // don't push tabs, handled outside if
+    //                 ucounter++;
+    //                 line_tab_count++;
+    //                 line_sample_count++;
+    //                 if (line_sample_count < schema.sample_count) {
+    //                     // if not the last term, include the tab
+    //                     // otherwise, the tab is handled outside the if
+    //                     linebuf.push_back(b);
+    //                     // string_appendc(linebuf, b);
+    //                 }
+    //             } else {
+    //                 linebuf.push_back(b);
+    //                 // string_appendc(linebuf, b);
+    //             }
+    //         }
+    //     } else {
+    //         // either 0|1, 1|0, or 1|1
+    //         byte_t masked = b & SAMPLE_MASK_01_10_11;
+    //         const std::string *sample_str = NULL;
+
+    //         if (masked == SAMPLE_MASKED_01) {
+    //             sample_str = &GT_01;
+    //         } else if (masked == SAMPLE_MASKED_10) {
+    //             sample_str = &GT_10;
+    //         } else if (masked == SAMPLE_MASKED_11) {
+    //             sample_str = &GT_11;
+    //         } else {
+    //             throw std::runtime_error("Error during decompression of compressed file, unrecognized bitmask");
+    //         }
+
+    //         // write the sample GT and increment counters
+    //         uint8_t count = (b & (~SAMPLE_MASK_01_10_11)) & 0xFF;
+    //         debugf("Got %s, count: %u\n", sample_str->c_str(), count);
+
+
+    //         // const std::string& cache_line = get_or_set_decompressed_cache(*sample_str, count);
+    //         // linebuf.append(cache_line);
+
+    //         // // update line counts
+    //         // line_tab_count += count;
+    //         // line_sample_count += count;
+
+    //         // // remove last tab if at end of line
+    //         // if (line_sample_count >= schema.sample_count) {
+    //         //     linebuf.pop_back();
+    //         //     line_tab_count--;
+    //         // }
+
+
+
+    //         while (count--) {
+    //             linebuf.append(*sample_str);
+    //             // string_appends(linebuf, sample_str->c_str());
+    //             line_sample_count++;
+    //             if (line_sample_count < schema.sample_count /*input_fstream.peek() != '\n'*/) {
+    //                 linebuf.push_back(tab[0]);
+    //                 // string_appendc(linebuf, tab[0]);
+    //             }
+    //             line_tab_count++;
+    //         }
+
+
+    //     } // end flag cases
+    // } // end sample loop
+    // debugf("Finished reading samples\n");
+
+    // // if (read(input_fd, &b, 1) <= 0) {
+    // if (fread(&b, 1, 1, input_file) < 1) {
+    //     throw std::runtime_error("Failed to read line ending");
+    // }
+    // if (b == '\n') {
+    //     linebuf.push_back(b);
+    // } else {
+    //     throw VcfValidationError("Sample line did not end in a newline\n");
+    // }
+
+    // *compressed_line_length = line_byte_count;
+
+    debugf("input_fd offset: %ld\n", tellfd(input_fd));
+    debugf("input_fd_dup offset: %ld\n", tellfd(input_fd_dup));
+    debugf("input_file offset: %ld\n", ftell(input_file));
+
+    // Reset input fd stream to offset of input_file to account for readahead
+    lseek(input_fd, ftell(input_file), SEEK_SET);
+    debugf("input_fd offset reset to: %ld\n", tellfd(input_fd));
+
+    fclose(input_file);
+
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("TIMING decompress2_data_line_FILEwrapper: %lu\n", duration.count());
+    #endif
+    return status;
+}
+
+int decompress2_data_line(
+        FILE *input_file,
+        const VcfCompressionSchema& schema,
+        std::string& linebuf,
+        size_t *compressed_line_length) {
+    debugf("%s decompressing line, expecting %lu samples\n", __FUNCTION__, schema.sample_count);
+    // decompress a single variant line
+    unsigned char b;
+    // int status;
+    #ifdef TIMING
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+
+    std::chrono::time_point<std::chrono::steady_clock> start2;
+    std::chrono::time_point<std::chrono::steady_clock> end2;
+    #endif
+
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    #endif
+
+    // Create FILE* wrapper of input_fd to improve small read performance.
+    // input_fd_dup is automatically closed when input_file is closed.
+    // int input_fd_dup = dup(input_fd);
+    // FILE *input_file = fdopen(input_fd_dup, "r");
+
 
     // keep track of how many columns we've seen
     size_t line_byte_count = 0;
     size_t line_tab_count = 0;
     size_t line_sample_count = 0;
-
-    if (eof_fd(input_fd)) {
+    if (feof(input_file)) {
         debugf("%s, no data in input_fd\n", __FUNCTION__);
         return 0;
     }
     struct compressed_line_length_headers line_length_headers;
     memset(&line_length_headers, 0, sizeof(struct compressed_line_length_headers));
 
-    read_compressed_line_length_headers(input_fd, &line_length_headers);
+    read_compressed_line_length_headers(input_file, &line_length_headers);
     line_byte_count += compressed_line_length_headers_size;
 
     uint32_t required_length = line_length_headers.required_columns_length;
@@ -1146,22 +784,7 @@ int decompress2_data_line_FILE(
     #ifdef TIMING
     start2 = std::chrono::steady_clock::now();
     #endif
-    // 19 seconds
-    // for (size_t i = 0; i < required_length; i++) {
-    //     char cb;
-    //     if (read(input_fd, &cb, 1) <= 0) {
-    //         throw std::runtime_error("fread error");
-    //     }
 
-    //     // string_appendc(linebuf, cb);
-    //     linebuf.push_back(cb);
-
-    //     if (cb == '\t') {
-    //         line_tab_count++;
-    //     }
-    // }
-
-    // 175 milliseconds
     // read the skipped bytes
     char *buf = (char*) calloc(required_length + 1, sizeof(char));
     debugf("Reading required columns\n");
@@ -1187,7 +810,7 @@ int decompress2_data_line_FILE(
     #ifdef TIMING
     end2 = std::chrono::steady_clock::now();
     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end2 - start2);
-    printf("skipping-required-columns time: %lu\n", duration.count());
+    printf("TIMING skipping-required-columns: %lu\n", duration.count());
     #endif
     debugf("Finished reading required columns\n");
     line_byte_count += required_length;
@@ -1242,7 +865,6 @@ int decompress2_data_line_FILE(
             // remove last tab if at end of line
             if (line_sample_count >= schema.sample_count) {
                 linebuf.pop_back();
-                // string_pop(linebuf);
                 line_tab_count--;
             }
         } else if ((b & SAMPLE_MASK_UNCOMPRESSED) == SAMPLE_MASKED_UNCOMPRESSED) {
@@ -1267,7 +889,6 @@ int decompress2_data_line_FILE(
                     }
                     // ending newline handled outside loop
                     debugf("got ending newline\n");
-                    // lseek(input_fd, -1, SEEK_CUR);
                     fseek(input_file, -1, SEEK_CUR);
                 }
                 else if (b == '\t') {
@@ -1279,11 +900,9 @@ int decompress2_data_line_FILE(
                         // if not the last term, include the tab
                         // otherwise, the tab is handled outside the if
                         linebuf.push_back(b);
-                        // string_appendc(linebuf, b);
                     }
                 } else {
                     linebuf.push_back(b);
-                    // string_appendc(linebuf, b);
                 }
             }
         } else {
@@ -1306,7 +925,6 @@ int decompress2_data_line_FILE(
             debugf("Got %s, count: %u\n", sample_str->c_str(), count);
 
 
-
             // const std::string& cache_line = get_or_set_decompressed_cache(*sample_str, count);
             // linebuf.append(cache_line);
 
@@ -1321,7 +939,6 @@ int decompress2_data_line_FILE(
             // }
 
 
-
             while (count--) {
                 linebuf.append(*sample_str);
                 // string_appends(linebuf, sample_str->c_str());
@@ -1332,7 +949,6 @@ int decompress2_data_line_FILE(
                 }
                 line_tab_count++;
             }
-
 
 
         } // end flag cases
@@ -1352,23 +968,134 @@ int decompress2_data_line_FILE(
 
     *compressed_line_length = line_byte_count;
 
-    debugf("input_fd offset: %ld\n", tellfd(input_fd));
-    debugf("input_fd_dup offset: %ld\n", tellfd(input_fd_dup));
+    // debugf("input_fd offset: %ld\n", tellfd(input_fd));
+    // debugf("input_fd_dup offset: %ld\n", tellfd(input_fd_dup));
     debugf("input_file offset: %ld\n", ftell(input_file));
 
     // Reset input fd stream to offset of input_file to account for readahead
-    lseek(input_fd, ftell(input_file), SEEK_SET);
-    debugf("input_fd offset reset to: %ld\n", tellfd(input_fd));
+    // lseek(input_fd, ftell(input_file), SEEK_SET);
+    // debugf("input_fd offset reset to: %ld\n", tellfd(input_fd));
 
-
-    fclose(input_file);
+    // fclose(input_file);
 
     #ifdef TIMING
     end = std::chrono::steady_clock::now();
     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    printf("decompress2_data_line_fd2_string time: %lu\n", duration.count());
+    printf("TIMING decompress2_data_line_fd2_string: %lu\n", duration.count());
     #endif
     return 1;
+}
+
+/**
+ * Reads from input_fstream. Assumes stream position is in the metadata section.
+ * Reads all following metadata lines and the header line. If the stream does not conform
+ * to the VCF line specification, throws an error.
+ *
+ * Places all lines read into output_vector, and the schema into output_schema.
+ */
+int decompress2_metadata_headers(
+        FILE *input_file,
+        std::vector<std::string>& output_vector,
+        VcfCompressionSchema& output_schema) {
+    #ifdef TIMING
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    #endif
+
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    #endif
+
+    // decompress all metadata and header lines
+    bool got_meta = false, got_header = false;
+    //int i1, i2;
+    char c1, c2;
+    size_t meta_count = 0, header_count = 0;
+
+    std::string linebuf;
+    linebuf.reserve(4 * 4096);
+    // string_t linebuf;
+    // string_reserve(&linebuf, 4096);
+
+    while (true) {
+        debugf("Reading next line\n");
+        linebuf.clear();
+
+        // if (read(input_fd, &c1, 1) <= 0 && (!got_header || !got_meta)) {
+        if (fread(&c1, 1, 1, input_file) < 1 && (!got_header || !got_meta)) {
+            throw VcfValidationError("File ended before a header or metadata line");
+        }
+        debugf("c1: %02x\n", c1);
+        if (c1 != '#') {
+            if (!got_meta || !got_header) {
+                throw VcfValidationError("File was missing headers or metadata");
+            }
+            debugf("%s", "Finished reading metadata and headers\n");
+            // need to undo read
+            debugf("Moving file offset back one\n");
+            fseek(input_file, -1, SEEK_CUR);
+            break;
+        } else if (got_header == true) {
+            // got a metadata or header row after already receiving a header row
+            throw VcfValidationError("Read a metadata or header row after already reading a header");
+        }
+
+        // if (read(input_fd, &c2, 1) <= 0) {
+        if (fread(&c2, 1, 1, input_file) < 1) {
+            throw VcfValidationError("Invalid format, empty header row");
+        }
+
+        if (c2 == '#') {
+            if (got_header) {
+                throw VcfValidationError("Got a metadata row after the CSV header");
+            }
+            debugf("Got a metadata line\n");
+            got_meta = true;
+            meta_count++;
+        } else {
+            if (!got_meta) {
+                throw VcfValidationError("Got a header line but no metadata lines");
+            }
+            got_header = true;
+            header_count++;
+        }
+
+        // this is a metadata or header line, so read the rest of the line
+        size_t tab_count = 0;
+        linebuf.push_back(c1);
+        linebuf.push_back(c2);
+
+        while (true) {
+            char c3;
+            // if (read(input_fd, &c3, 1) <= 0) {
+            if (fread(&c3, 1, 1, input_file) < 1) {
+                throw VcfValidationError("Failed to read the rest of the metadata or header row!");
+            } else if (c3 == '\n') {
+                linebuf.push_back(c3);
+                // string_appendc(&linebuf, '\n');
+                break;
+            } else if (got_header && c3 == '\t') { // got_header is only true once we are parsing a TSV header line
+                tab_count++;
+                if (tab_count > VCF_REQUIRED_COL_COUNT) {
+                    output_schema.sample_count++;
+                }
+            }
+            linebuf.push_back(c3);
+            // string_appendc(&linebuf, c3);
+        }
+
+        debugf("Line: %s\n", linebuf.c_str());
+        output_vector.push_back(linebuf);
+    }
+    debugf("Line counts: metadata = %ld, header = %ld\n", meta_count, header_count);
+    debugf("Sample count: %ld\n", output_schema.sample_count);
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("TIMING decompress2_metadata_headers: %lu\n", duration.count());
+    #endif
+    return 0;
 }
 
 
@@ -1479,7 +1206,7 @@ int decompress2_metadata_headers_fd(
     #ifdef TIMING
     end = std::chrono::steady_clock::now();
     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    printf("decompress2_metadata_headers_fd time: %lu\n", duration.count());
+    printf("TIMING decompress2_metadata_headers_fd: %lu\n", duration.count());
     #endif
     return 0;
 }
@@ -1512,7 +1239,7 @@ int decompress2_fd(const std::string& input_filename, const std::string& output_
         variant_line.clear();
 
         size_t compressed_line_length = 0;
-        int status = decompress2_data_line_fd2_string(input_fd, schema, variant_line, &compressed_line_length);
+        int status = decompress2_data_line_FILEwrapper(input_fd, schema, variant_line, &compressed_line_length);
         if (status == 0) {
             debugf("Finished reading file\n");
             break;

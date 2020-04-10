@@ -1,14 +1,19 @@
 # build files
 main
 main_release
+main_debug
+main_timing
+**/__pycache__/
+
 
 # editor files
 .vscode/
 
-# text files
+# data and text files
 decompress.log
 compress.log
 *.decompressed
 *.hexdump
 *.vcf
 *.vcfc
+

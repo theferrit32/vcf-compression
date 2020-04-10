@@ -24,7 +24,7 @@ typedef uint8_t byte_t;
     #define debugf(...) {}
 #endif
 
-#define DEFAULT_FILE_CREATE_FLAGS (O_CREAT | O_WRONLY)
+#define DEFAULT_FILE_CREATE_FLAGS (O_CREAT | O_TRUNC | O_WRONLY)
 #define DEFAULT_FILE_CREATE_MODE (S_IRUSR | S_IWUSR)
 #define VCFC_BINNING_INDEX_EXTENSION ".vcfci"
 
@@ -196,16 +196,6 @@ public:
     }
 
     void deserialize(uint8_t in[4]) {
-        // #ifdef TIMING
-        // std::chrono::time_point<std::chrono::steady_clock> start;
-        // std::chrono::time_point<std::chrono::steady_clock> end;
-        // std::chrono::nanoseconds duration;
-        // #endif
-
-        // #ifdef TIMING
-        // start = std::chrono::steady_clock::now();
-        // #endif
-
         debugf("%s input bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n", __FUNCTION__, in[0], in[1], in[2], in[3]);
         this->extension_count = (in[0] >> 6) & 0x03;
         if (this->extension_count != 3) {
@@ -237,12 +227,6 @@ public:
             | ((this->length_bytes[3] << 0) /*& (0xFF << 0)*/);
         debugf("length = %u, 0x%08X\n", length, length);
 
-        // #ifdef TIMING
-        // end = std::chrono::steady_clock::now();
-        // duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-        // printf("LineLengthHeader.deserialize time: %lu\n", duration.count());
-        // #endif
-
         // debugf("%s %02X %02X %02X %02X extension_count = %u, length = %u, bytes %02X %02X %02X %02X, bin = %s\n",
         //     __FUNCTION__, in[0], in[1], in[2], in[3],
         //     this->extension_count, this->length,
@@ -273,6 +257,7 @@ uint64_t str_to_uint64(const std::string& s, bool& success);
 
 void uint64_to_uint8_array(uint64_t val, uint8_t bytes[8]);
 void uint8_array_to_uint64(uint8_t bytes[8], uint64_t *val);
+void uint32_to_uint8_array(uint32_t val, uint8_t bytes[4]);
 
 /**
  * This should be avoided as much as possible as it involves a seek back,
@@ -282,6 +267,7 @@ void uint8_array_to_uint64(uint8_t bytes[8], uint64_t *val);
  * Returns the return from read(). Negative on error, zero on EOF, 1 on success.
  */
 int peekfd(int fd, unsigned char *c);
+
 bool eof_fd(int fd);
 // Provides istream::peek function for C FILEs
 int peek_FILE(FILE *stream);

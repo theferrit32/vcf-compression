@@ -193,6 +193,14 @@ void uint8_array_to_uint64(uint8_t bytes[8], uint64_t *val) {
         (((bytes[7] | zero64) << 0)  & (FF_low << 0));
 }
 
+void uint32_to_uint8_array(uint32_t val, uint8_t bytes[4]) {
+    uint32_t FF_low = 0x000000FF;
+    bytes[0] = (val >> 24) & (FF_low << 0);
+    bytes[1] = (val >> 16) & (FF_low << 0);
+    bytes[2] = (val >> 8)  & (FF_low << 0);
+    bytes[3] = (val >> 0)  & (FF_low << 0);
+}
+
 /**
  * This should be avoided as much as possible as it involves a seek back,
  * which depending on underlying kernel and hardware could be expensive if

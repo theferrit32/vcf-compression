@@ -1,0 +1,193 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+% \usepackage{natbib}
+
+\usepackage{biblatex}
+\addbibresource{refs.bib}
+
+\usepackage{parskip}
+
+\parindent 0pt
+\parskip 5pt
+
+\title{Master's Thesis}
+\author{Kyle Ferriter}
+\date{January 2020}
+
+\begin{document}
+
+\maketitle
+
+\section{Abstract}
+
+.\section{Introduction}
+
+Over the last decade, and increasingly in recent years, genomic datasets have rapidly grown in size and increased in the demands being placed on the accessibility by researchers. These datasets are expected to increase growing even more rapidly as genome sampling becomes more common, and precision medicine. The data needs to be able to be stored long term in a cheap manner, but also be readily accessible to low-latency random access patterns. On top of these features, storage must also support high concurrency by placing limited demands on read I/O, CPU, and memory utilization.
+
+% This work does not focus on this:
+%Another necessary feature is the ability to insert new data records when new sequence data needs to be ingested to a given dataset with minimal runtime complexity.
+
+In this document I cover two topics in this research domain: compression, and indexing. Regarding compression I look at existing techniques, and then propose a different strategy which takes into account particular known constraints and patterns of the input data. Regarding the topic of indexing, existing techniques are briefly covered, then a proposal for new indexing which can take into consideration certain features of the proposed compression technique.
+
+\section{Background}
+
+Variant Call Files (VCF) are used to store data on a given $m$ samples of omic data, by storing $n$ TSV-formatted rows. $n$ is the number of differences which exist between the union of all samples in the file, with a corresponding reference omic file. Reference files like \cite{grch37} provide a way to reduce the storage needed by allowing individual sample data to be stored only as the diff between it and the reference.
+
+Each line in a VCF can be referred to as a \emph{variant} as it records a particular instance of one or more samples varying from the reference. Each record contains information about the variant itself: where it occurs, what the change in DNA base pairs is, an \texttt{INFO} column with key-value pair information about the variant. After these TSV columns there is one column called \texttt{FORMAT} describing the format of the sample columns, of which there are $1$ to $m$, and $m$ is theoretically unbounded. Each of the $m$ sample columns contains values which correspond to the format specified in the \texttt{FORMAT} field. The format specifiers allowed in the \texttt{FORMAT} field are specified in the VCF specification, page ().
+
+An example of a VCF file snippet is given below.
+
+\small{
+\begin{verbatim}
+##fileformat=VCFv4.1
+##FILTER=<ID=PASS,Description="All filters passed">
+##fileDate=20150218
+#CHROM POS ID  REF  ALT QUAL FILTER  INFO            FORMAT HG01 HG03 HG04 HG05 HG08 HG15
+1  10075  rs12  A    G  100  PASS    AC=1;AN=5008;   GT     0|0  0|0  0|0   0|0  0|0  0|0
+1  10115  rs21  G    A  100  PASS    AC=32;AN=5008;  GT     0|0  0|0  0|0   0|0  0|0  0|0
+1  10213  rs24  C    T  100  PASS    AC=38;AN=5008;  GT     0|0  0|0  0|0   0|0  0|0  0|0
+1  10319  rs28  C    T  100  PASS    AC=1;AN=5008;   GT     0|0  0|0  0|0   0|0  0|1  0|0
+1  10527  rs32  C    A  100  PASS    AC=1;AN=5008;   GT     0|0  0|0  0|0   0|0  0|0  0|0
+1  10568  rs40  C    A  100  PASS    AC=2;AN=5008;   GT     0|0  0|0  0|0   0|0  0|0  0|0
+1  10607  rs42  G    A  100  PASS    AC=5;AN=5008;   GT     0|0  0|0  0|0   1|0  0|0  0|0
+1  10838  rs44;rs46  GA GAA,G 100 PASS AC=658,1361;AN=5008; GT 2|0 0|2 0|2  0|1  2|0  0|2
+
+\end{verbatim}
+}
+In this research, I focus only on genomic VCF files. I also focus on genotyping data in particular, which constrains the values that are possible in the \texttt{FORMAT} column to only \texttt{GT} (see VCF specification citation). This is to simplify the number of input formats handled by the implementations in this paper. Many of the compression gains made rely on grouping similar typed values together into runs, so with more complex \texttt{FORMAT} specifications the elements within the columns should be grouped across columns instead of within the individual columns. For example, if a \texttt{FORMAT} specification has two elements, during compression the first element of each sample column should be grouped, then compressed, and the second element of each column should be grouped then compressed. Since these are still stored within the same record, a jump count can be inserted before each grouped section in order to enable a reader to skip between the sections.
+
+During analysis, medical researchers use these datasets to look for variants in particular regions. Once filtering to regions, more in-depth analyses often take place at the sample or annotation level.
+
+
+\section{Existing Solutions}
+
+\subsection{Compression}
+
+\subsubsection{htslib (.bgzf / .vcf.gz)}
+
+Brief overview of the compression strategy.
+
+Cite specification, source repository.
+
+\subsubsection{bcftools (.bcf)}
+
+Brief overview of the compression strategy.
+
+Cite specification, source repository.
+
+\subsection{Indexing}
+
+
+\subsubsection{tabix}
+
+Brief overview of the indexing strategy.
+
+Insert high level diagram.
+
+Cite specification, source repository.
+
+\section{Algorithm and Design}
+
+\subsection{Compression (VCFC)}
+
+Describe run length compression in deeper detail than in background. Perhaps move that entire description here.
+
+
+
+
+\subsection{Line Based Indexing}
+
+In this section I include three strategies for performing line-based based indexing. These are listed below.
+
+\begin{enumerate}
+    \item Sparse file-offset-as-index
+
+\end{enumerate}
+
+TODO: advantage over Tabix.
+
+
+\subsection{Bin Based Indexing}
+\begin{enumerate}
+    \item Contiguous external binned index
+    \item Sparse external binned index
+\end{enumerate}
+
+TODO: how is this different from Tabix.
+
+
+
+
+\subsubsection{Sparse File-Offset-As-Index}
+
+In this strategy, for each variant, a positive integer offset is computed based on the reference name and the position within the reference of this variant.
+
+
+TODO:
+
+Describe formula for computing byte offsets. Provide realistic examples.
+
+Include diagram from slide presentation. Improve readability. Include description.
+
+Describe nominal file size (max file address) vs real file size (allocated blocks). Compare numbers using some real VCF files. Describe dependence and relation to filesystem block size. Show difference in fragmentation related to filesystem block size.
+
+Show block fragmentation graphs from slides, include those from 1-K and 2-K block size filesystems.
+
+\subsection{Contiguous external binned index}
+
+TODO:
+
+Describe index layout.
+
+
+\subsection{Sparse external binned index}
+
+
+TODO:
+
+Describe index layout.
+
+\section{Experimental Framework}
+
+describe build and test environment
+
+cite arc cluster
+
+\section{Results}
+
+
+Graphs to include:
+
+\begin{enumerate}
+    \item Sparse file internal block fragmentation. Maybe move to Design.
+
+    \item Sparse file lookup times.
+        \begin{enumerate}
+            \item Single-variant lookup, varying the position queried.
+            \item Range lookup, varying the difference between start/end position of the query range. Possibly use gene dataset
+        \end{enumerate}
+    \item Contiguous index  lookup times. (same query types as above)
+    \item Sparse index lookup times. (same query types as above)
+\end{enumerate}
+
+
+
+%\section{Discussion}
+
+
+\section{Related Work}
+
+\section{Conclusion}
+
+\section{Future Work}
+
+\textbf{Add to references:}
+\begin{enumerate}
+    \item VCF Specification
+    \item ARC cluster
+    \item SEEK\_DATA lseek specification
+    \item EXT4/XFS filesystem descriptions relevant to this work
+\end{enumerate}
+
+% \Huge\Huge \emph{The}
+\end{document}
