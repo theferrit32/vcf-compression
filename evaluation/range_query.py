@@ -61,7 +61,8 @@ def measure_binned_index_single_exhaustive():
         vcfc_binned_durations.append({
             'start_position': pos,
             'end_position': pos,
-            'data': durs
+            'time': sum(durs)/len(durs),
+            'stddev': np.std(durs)
         })
 
     data['vcfc_binned_exhaustive_%d' % bin_size] = {
@@ -81,7 +82,8 @@ def measure_binned_index_single_exhaustive():
         bgzip_durations.append({
             'start_position': pos,
             'end_position': pos,
-            'data': durs
+            'time': sum(durs)/len(durs),
+            'stddev': np.std(durs)
         })
 
     data['bgzip_exhaustive'] = {
@@ -112,6 +114,7 @@ def measure_binned_index_single_exhaustive():
     return {
         'data': data,
         'title': 'VCFC Binned Index, Single Variant Lookup',
+        'name': 'binned-exhaustive-single',
         'xlabel': 'Variant Position',
         'ylabel': 'Time (seconds)'
     }
@@ -139,6 +142,8 @@ def graph_measurements(measurements, xfunc, yfunc, stddev_label=False):
     plots = []
     legend_labels = []
 
+    max_yval = 0
+
     for k in measurements['data']:
         measurement = measurements['data'][k]
         print('measurement:\n' + json.dumps(measurement))
@@ -151,6 +156,10 @@ def graph_measurements(measurements, xfunc, yfunc, stddev_label=False):
             xvals.append(xfunc(val))
             yvals.append(yfunc(val))
         print('Plotting %s' % measurement['label'])
+
+        # Update max_yval
+        if max(yvals) > max_yval:
+            max_yval = max(yvals)
         # print('xvals:\n' + str(xvals))
         # print('yvals:\n' + str(yvals))
 
@@ -168,6 +177,7 @@ def graph_measurements(measurements, xfunc, yfunc, stddev_label=False):
     plt.xlabel(measurements['xlabel'])
     plt.ylabel(measurements['ylabel'])
     # plt.xticks(rotation=90)
+    plt.ylim(bottom=0, top=max_yval)
     plt.legend()
     plt.title(measurements['title'])
 
@@ -175,7 +185,10 @@ def graph_measurements(measurements, xfunc, yfunc, stddev_label=False):
     plt.margins(0.01)
     plt.tight_layout()
 
-    filename = measurements['title'].replace(' ', '_') + '.png'
+    if 'name' in measurements:
+        filename = measurements['name'] + '.png'
+    else:
+        filename = measurements['title'].replace(' ', '_') + '.png'
     plt.savefig(filename, dpi=200)
     print('Saved figure: %s' % filename)
 
@@ -243,6 +256,7 @@ def measure_sparse_single_variant_exhaustive():
     return {
         'data': data,
         'title': 'VCFC Sparse Offset-as-Index, Single Variant Lookup',
+        'name': 'sparse-exhaustive-single',
         'xlabel': 'Variant query location',
         'ylabel': 'Time (seconds)'
     }
@@ -252,7 +266,88 @@ def graph_sparse_single_variant_exhaustive(measurements):
     graph_measurements(measurements, lambda val:val['start_position'], lambda val:val['time'])
 
 
-def measure_sparse_range_queries():
+def measure_sparse_range_queries(query_range:int=10000, queries:int=100):
+    data = {}
+    assert queries > 0, 'queries > 0'
+    # Set step to fit `queries` number of positions into the range(min_pos, max_pos)
+    step = int((max_pos - query_range - min_pos) / queries)
+    config = Config(tabix_cmd, vcfc_dir, bgzip_cmd)
+
+    # measure percentage of search space for each, not whole file
+    # iter_max = int((max_pos - min_pos) / step * 0.05)
+
+    # VCFC measurements
+    # Iterate through ranges starting at front of file
+    sparse_durations = []
+    for pos in range(min_pos, (min_pos+step*queries)+1, step):
+        print('sparse_query: %d' % pos)
+        end_pos = pos + query_range
+        durs = []
+        for _ in range(test_runs):
+            durs.append(run_vcfc_sparse_query(config, sparse_filename, reference_name, pos, end_pos))
+
+        sparse_durations.append({
+            'start_position': min_pos,
+            'end_position': end_pos,
+            'time': sum(durs)/len(durs),
+            'stddev': np.std(durs)
+        })
+    data['vcfc_sparse_exhaustive'] = {
+        'data': sparse_durations,
+        'label': 'Sparse Offset-as-Index'
+    }
+
+
+    # Tabix+BGZIP measurements
+    tabix_bgzip_durations = []
+    for pos in range(min_pos, (min_pos+step*queries)+1, step):
+        print('bgzf_query: %d' % pos)
+        end_pos = pos + query_range
+        durs = []
+        for _ in range(test_runs):
+            durs.append(run_tabix(config, bgzip_filename, reference_name, pos, end_pos))
+        tabix_bgzip_durations.append({
+            'start_position': min_pos,
+            'end_position': end_pos,
+            'time': sum(durs)/len(durs),
+            'stddev': np.std(durs)
+        })
+    data['tabix_bgzip_exhaustive'] = {
+        'data': tabix_bgzip_durations,
+        'label': 'BGZF + Tabix'
+    }
+
+
+    # Tabix+BCF measurements
+    tabix_bcf_durations = []
+    for pos in range(min_pos, (min_pos+step*queries)+1, step):
+        print('bcf_query: %d' % pos)
+        end_pos = pos + query_range
+        durs = []
+        for _ in range(test_runs):
+            durs.append(run_tabix(config, bcf_filename, reference_name, pos, end_pos))
+        tabix_bcf_durations.append({
+            'start_position': min_pos,
+            'end_position': end_pos,
+            'time': sum(durs)/len(durs),
+            'stddev': np.std(durs)
+        })
+    data['tabix_bcf_exhaustive'] = {
+        'data': tabix_bcf_durations,
+        'label': 'BCF + Tabix'
+    }
+
+
+    return {
+        'data': data,
+        'title': 'VCFC Sparse Offset-as-Index, Query Range %d' % query_range,
+        'name': 'sparse-exhaustive-range',
+        'xlabel': 'Query Range Start Position',
+        'ylabel': 'Time (seconds)'
+    }
+
+
+def measure_sparse_range_queries_old():
     data = {}
     config = Config(tabix_cmd, vcfc_dir, bgzip_cmd)
     step = 100000
@@ -400,6 +495,7 @@ def measure_sparse_range_queries():
     return {
         'data': data,
         'title': 'VCFC Binned Index, Range Lookup',
+        'name': 'binned-exhaustive-range',
         'xlabel': 'Query Range',
         'ylabel': 'Time (seconds)'
     }
@@ -443,7 +539,7 @@ def measure_binned_index_time_profile():
                 if k not in bin_profile:
                     bin_profile[k] = 0
                 for p in profiles:
-                    bin_profile[k] += p[k]
+                    bin_profile[k] += p[k] / test_runs
 
         data['vcfc_binned_index_%d' % bin_size] = {
             'data': bin_profile,
@@ -454,11 +550,12 @@ def measure_binned_index_time_profile():
     return {
         'data': data,
         'title': 'VCFC Binned Index Query Phase Time Profile, Single Variant Lookup',
+        'name': 'binned-timing-profile',
         'xlabel': 'Bin Size',
         'ylabel': 'Time (seconds)'
     }
 
-def measure_binned_index_time_profile_range(query_range:int=10000, queries:int=50):
+def measure_binned_index_time_profile_range(query_range:int=10000, queries:int=100):
     data = {}
     assert queries > 0, 'queries > 0'
     # Set step to fit `queries` number of positions into the range(min_pos, max_pos)
@@ -479,8 +576,6 @@ def measure_binned_index_time_profile_range(query_range:int=10000, queries:int=5
         print('Finished creating binned index, took %f seconds' % (bin_index_creation_time))
 
         # Run regular queries, aggregate profile after each
-
-        # vcfc_binned_durations = []
         print('Running %d exhaustive binned queries of size %d')
         # get exactly `queries` loops, account for rounding
         for pos in range(min_pos, (min_pos+step*queries)+1, step):
@@ -496,7 +591,7 @@ def measure_binned_index_time_profile_range(query_range:int=10000, queries:int=5
                 if k not in bin_profile:
                     bin_profile[k] = 0
                 for p in profiles:
-                    bin_profile[k] += p[k]
+                    bin_profile[k] += p[k] / test_runs
 
         data['vcfc_binned_index_%d' % bin_size] = {
             'data': bin_profile,
@@ -506,6 +601,7 @@ def measure_binned_index_time_profile_range(query_range:int=10000, queries:int=5
     return {
         'data': data,
         'title': 'VCFC Binned Index Interval, Query Range %d' % query_range,
+        'name': 'binned-timing-profile-range',
         'xlabel': 'Bin Size',
         'ylabel': 'Time (seconds)'
     }
@@ -588,7 +684,10 @@ def graph_binned_index_time_profile(measurements):
     plt.ylim(top=max_cumulative_yval*1.1)
     plt.legend(plots, yval_labels)
     plt.title(measurements['title'])
-    filename = measurements['title'].replace(' ', '_') + '.png'
+    if 'name' in measurements:
+        filename = measurements['name'] + '.png'
+    else:
+        filename = measurements['title'].replace(' ', '_') + '.png'
 
     # Tighten layout
     plt.margins(0.01)
@@ -600,11 +699,6 @@ def graph_binned_index_time_profile(measurements):
 
 
 def main(args):
-    if len(args) < 2:
-        print('Usage: range_query.py opname [measure|graph]')
-        print('opnames:\n' + '\n'.join(o[0] for o in ops))
-        return -1
-
     ops = [
         ['sparse-exhaustive-range', measure_sparse_range_queries, graph_sparse_range_queries],
         ['sparse-exhaustive-single', measure_sparse_single_variant_exhaustive, graph_sparse_single_variant_exhaustive],
@@ -615,6 +709,17 @@ def main(args):
         ['binned-timing-profile-range', measure_binned_index_time_profile_range, graph_binned_index_time_profile]
     ]
 
+    def print_usage():
+        print('Usage: range_query.py opname [measure|graph]')
+        print('opnames:\n' + '\n'.join(o[0] for o in ops))
+
+    if len(args) < 2:
+        print_usage()
+        return -1
+
+    if args[0] not in [o[0] for o in ops]:
+        print_usage()
+        raise RuntimeError('Unrecognized subcommand')
 
     for op in ops:
         opname = op[0]
@@ -632,75 +737,6 @@ def main(args):
                     data = json.load(f)
                 graph_func(data)
 
-
-
-    return
-
-    if args[0] == 'measure-sparse-exhaustive-range':
-        measurements = measure_sparse_range_queries()
-        fname = 'sparse-exhaustive-range.json'
-        with open(fname, 'w') as f:
-            json.dump(measurements, f)
-        print('Wrote file: %s' % fname)
-        graph_sparse_range_queries(measurements)
-    # elif args[0] == 'graph':
-    #     with open('range-measurements.json', 'r') as f:
-    #         measurements = json.load(f)
-    #     graph_sparse_range_queries(measurements)
-
-    elif args[0] == 'measure-sparse-exhaustive-single':
-        measurements = measure_sparse_single_variant_exhaustive()
-        fname = 'sparse-exhaustive-single.json'
-        with open(fname, 'w') as f:
-            json.dump(measurements, f)
-        print('Wrote file: %s' % fname)
-        graph_sparse_single_variant_exhaustive(measurements)
-    # elif args[0] == 'graph-sparse-exhaustive-single':
-    #     with open('sparse-exhaustive-single.json', 'r') as f:
-    #         measurements = json.load(f)
-    #     graph_sparse_single_variant_exhaustive(measurements)
-
-    elif args[0] == 'binned-exhaustive-single':
-        fname = 'binned-exhaustive-single.json'
-        if args[1] == 'measure':
-            measurements = measure_binned_index_single_exhaustive()
-            with open(fname, 'w') as f:
-                json.dump(measurements, f)
-            print('Wrote file: %s' % fname)
-        if args[1] in ('graph', 'measure'):
-            with open(fname) as f:
-                measurements = json.load(f)
-            graph_binned_index_single_exhaustive(measurements)
-
-
-    elif args[0] == 'measure-binned-timing-profile':
-        measurements = measure_binned_index_time_profile()
-        fname = 'binned-timing-profile.json'
-        with open(fname, 'w') as f:
-            json.dump(measurements, f)
-        print('Wrote file: %s' % fname)
-        graph_binned_index_time_profile(measurements)
-    # elif args[0] == 'graph-binned-timing-profile':
-    #     with open('binned-timing-profile.json', 'r') as f:
-    #         measurements = json.load(f)
-    #     graph_binned_index_time_profile(measurements)
-
-
-    # Evaluate external binned index, with range-based queries, default 10k
-    elif args[0] == 'measure-binned-timing-profile-range':
-        measurements = measure_binned_index_time_profile_range()
-        fname = 'binned-timing-profile-range.json'
-        with open(fname, 'w') as f:
-            json.dump(measurements, f)
-        print('Wrote file: %s' % fname)
-        graph_binned_index_time_profile(measurements)
-    # elif args[0] == 'graph-binned-timing-profile-range':
-    #     with open('binned-timing-profile-range.json', 'r') as f:
-    #         measurements = json.load(f)
-    #     graph_binned_index_time_profile(measurements) # same as for single
-
-    else:
-        print('Unknown subcommand: %s' % args[0])
 
 if __name__ == '__main__':
     exit(main(sys.argv[1:]))
