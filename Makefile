@@ -24,5 +24,8 @@ timing: main_timing
 main_timing: $(SOURCE)
 	g++ $(CPP_FLAGS) -O3 -DTIMING -o $@ $^
 
+uniqc: src/uniqc.cpp
+	g++ $(CPP_FLAGS) -O3 -o $@ $^
+
 clean:
 	rm -f main main_debug main_release main_timing
