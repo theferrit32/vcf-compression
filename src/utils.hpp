@@ -272,5 +272,6 @@ bool eof_fd(int fd);
 // Provides istream::peek function for C FILEs
 int peek_FILE(FILE *stream);
 bool file_exists(const char *filename);
+long file_size(const char *filename);
 
 #endif

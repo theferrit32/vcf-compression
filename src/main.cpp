@@ -492,22 +492,23 @@ int write_index_entry_fd(int fd, struct index_entry *entry) {
     return 0;
 }
 
-int write_index_entry(FILE *file, struct index_entry *entry) {
+long write_index_entry(FILE *file, struct index_entry *entry) {
     // write(fd, &entry->reference_name_idx, sizeof(entry->reference_name_idx));
     // write(fd, &entry->position, sizeof(entry->position));
     // write(fd, &entry->byte_offset, sizeof(entry->byte_offset));
 
-    fwrite(&entry->reference_name_idx, sizeof(entry->reference_name_idx), 1, file);
-    fwrite(&entry->position, sizeof(entry->position), 1, file);
-    fwrite(&entry->byte_offset, sizeof(entry->byte_offset), 1, file);
-    return 0;
+    long total_bytes = 0;
+    total_bytes += fwrite(&entry->reference_name_idx, sizeof(entry->reference_name_idx), 1, file);
+    total_bytes += fwrite(&entry->position, sizeof(entry->position), 1, file);
+    total_bytes += fwrite(&entry->byte_offset, sizeof(entry->byte_offset), 1, file);
+    return total_bytes;
 }
 
 /**
  * Returns 0 on success. Sets `bytes_read` to the number of bytes read. Should be the
  * sum of the size of the fields in a struct index_entry.
  */
-int read_index_entry(int fd, struct index_entry *entry, int *bytes_read) {
+int read_index_entry_fd(int fd, struct index_entry *entry, int *bytes_read) {
     int read_count = 0, n = 0;
     n = read(fd, &(entry->reference_name_idx), sizeof(uint8_t));
     if (n == 0) {
@@ -549,8 +550,52 @@ int read_index_entry(int fd, struct index_entry *entry, int *bytes_read) {
     return 0;
 }
 
+/**
+ * Returns 0 on success. Sets `bytes_read` to the number of bytes read. Should be the
+ * sum of the size of the fields in a struct index_entry.
+ */
+int read_index_entry(FILE *file, struct index_entry *entry, int *bytes_read) {
+    int read_count = 0, n = 0;
+    // n = read(fd, &(entry->reference_name_idx), sizeof(uint8_t));
+    n = fread(&(entry->reference_name_idx), sizeof(uint8_t), 1, file);
+    if (n < 1) {
+        debugf("Failed to read reference_name_idx, status = %d\n", n);
+        debugf("Unexpected EOF\n");
+        perror("fread");
+        return -1;
+    } else {
+        read_count += n * sizeof(uint8_t);
+    }
 
-void create_binning_index(const std::string& compressed_input_filename, const std::string& index_filename, VcfPackedBinningIndexConfiguration& index_configuration) {
+    n = fread(&entry->position, sizeof(uint32_t), 1, file);
+    if (n < 1) {
+        debugf("Failed to read position, status = %d\n", n);
+        debugf("Unexpected EOF\n");
+        perror("fread");
+        return -1;
+    } else {
+        read_count += n * sizeof(uint32_t);
+    }
+
+    n = fread(&entry->byte_offset, sizeof(uint64_t), 1, file);
+    if (n < 1) {
+        debugf("Failed to read byte_offset, status = %d\n", n);
+        debugf("Unexpected EOF\n");
+        perror("read");
+        return -1;
+    } else {
+        read_count += n * sizeof(uint64_t);
+    }
+
+    *bytes_read = read_count;
+    return 0;
+}
+
+
+void create_sparse_binning_index(
+        const std::string& compressed_input_filename,
+        const std::string& index_filename,
+        SparsificationConfiguration& sparse_config) {
     FILE *input_file = fopen(compressed_input_filename.c_str(), "r");
     if (input_file == NULL) {
         perror("fopen");
@@ -579,50 +624,11 @@ void create_binning_index(const std::string& compressed_input_filename, const st
 
     // Iterate through lines of compressed file
     while (true) {
-        // long line_byte_offset = tellfd(input_fd);
         long line_byte_offset = ftell(input_file);
 
         debugf("Start of line, stream positioned so next byte is at position %ld (0x%08lx)\n",
                 line_byte_offset,
                 line_byte_offset);
-
-        // right now all length headers are 4 bytes
-        // TODO update to interpret variable-length length headers
-        // uint8_t line_length_header_bytes[4] = {0,0,0,0};
-
-        // status = read(input_fd, &line_length_header_bytes, 4);
-        // if (status < 0) {
-        //     throw std::runtime_error("Error reading from file");
-        // } else if (status == 0) {
-        //     debugf("Finished reading file\n");
-        //     break;
-        // } else if (status < 4) {
-        //     throw std::runtime_error(string_format("Only read %d bytes, expected 4", status));
-        // }
-
-        // debugf("line_length_header_bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
-        //         line_length_header_bytes[0],
-        //         line_length_header_bytes[1],
-        //         line_length_header_bytes[2],
-        //         line_length_header_bytes[3]);
-
-        // uint8_t required_columns_length_header_bytes[4] = {0,0,0,0};
-
-        // status = read(input_fd, &required_columns_length_header_bytes, 4);
-        // if (status < 0) {
-        //     throw std::runtime_error("Error reading from file");
-        // } else if (status == 0) {
-        //     debugf("Finished sparsifying file\n");
-        //     break;
-        // } else if (status < 4) {
-        //     throw std::runtime_error(string_format("Only read %d bytes, expected 4", status));
-        // }
-
-        // debugf("required_columns_length_header_bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
-        //         required_columns_length_header_bytes[0],
-        //         required_columns_length_header_bytes[1],
-        //         required_columns_length_header_bytes[2],
-        //         required_columns_length_header_bytes[3]);
 
         compressed_line_length_headers line_length_headers;
         memset(&line_length_headers, 0, sizeof(compressed_line_length_headers));
@@ -643,6 +649,179 @@ void create_binning_index(const std::string& compressed_input_filename, const st
         // LineLengthHeader line_length_header;
         // line_length_header.set_extension_count(3); // TODO interpret
         // line_length_header.deserialize(line_length_header_bytes);
+
+        uint8_t line_length_header_bytes[4];
+        uint32_to_uint8_array(line_length_headers.line_length, line_length_header_bytes);
+        uint8_t required_columns_length_header_bytes[4];
+        uint32_to_uint8_array(line_length_headers.required_columns_length, required_columns_length_header_bytes);
+
+
+        debugf("Line length: %d\n", line_length_headers.line_length);
+
+        // collect bytes to end of line
+        size_t i = 0;
+        line_bytes.clear();
+        if (line_bytes.capacity() < line_length_headers.line_length + read_bytes) {
+            line_bytes.reserve(line_length_headers.line_length + read_bytes);
+        }
+
+        // two uint64 placeholders for diffs to previous, next line
+        for (size_t placeholder_i = 0; placeholder_i < 16; placeholder_i++) {
+            line_bytes.push_back(0);
+        }
+
+        line_bytes.push_back(line_length_header_bytes[0]);
+        line_bytes.push_back(line_length_header_bytes[1]);
+        line_bytes.push_back(line_length_header_bytes[2]);
+        line_bytes.push_back(line_length_header_bytes[3]);
+        line_bytes.push_back(required_columns_length_header_bytes[0]);
+        line_bytes.push_back(required_columns_length_header_bytes[1]);
+        line_bytes.push_back(required_columns_length_header_bytes[2]);
+        line_bytes.push_back(required_columns_length_header_bytes[3]);
+
+        debugf("line_bytes with headers only: %s\n", byte_vector_to_string(line_bytes).c_str());
+
+        // keep track of some column values as we go across, for offset calculation
+        bool got_reference_name = false;
+        // string_t reference_name;
+        // string_reserve(&reference_name, 32);
+        std::string reference_name;
+        reference_name.reserve(32);
+
+        bool got_pos = false;
+        // string_t pos_str;
+        // string_reserve(&pos_str, 32);
+        std::string pos_str;
+        pos_str.reserve(32);
+
+        size_t pos = 0;
+
+        // iterate over the rest of the line
+        // subtract 4 due to length of required_columns_length_header_bytes, which are already read
+        while (i++ < line_length_headers.line_length - 4) {
+            unsigned char b;
+            // if (read(input_fd, &b, 1) <= 0) {
+            if (fread(&b, 1, 1, input_file) < 1) {
+                std::string msg = string_format(
+                    "Unexpectedly reached end of compressed file, line header said %d, but only read %d bytes from line",
+                    line_length_headers.line_length, i);
+                throw VcfValidationError(msg.c_str());
+            }
+            line_bytes.push_back(b);
+
+            if (!got_reference_name) {
+                if (b != '\t') {
+                    // string_appendc(&reference_name, b);
+                    reference_name.push_back(b);
+                } else {
+                    if (reference_name.size() == 0) {
+                        throw std::runtime_error("Line did not contain a reference name");
+                    } else {
+                        debugf("Got reference name: %s\n", reference_name.c_str());
+                        got_reference_name = true;
+                    }
+                }
+            } else if (!got_pos) {
+                if (b != '\t') {
+                    pos_str.push_back(b);
+                } else {
+                    if (pos_str.size() == 0) {
+                        throw std::runtime_error("Line did not contain a position value");
+                    } else {
+                        debugf("Got position: %s\n", pos_str.c_str());
+                        got_pos = true;
+                        char *endptr = NULL;
+                        pos = strtoul(pos_str.c_str(), &endptr, 10);
+                        if (endptr != pos_str.c_str() + pos_str.size()) {
+                            throw std::runtime_error("Failed to parse full position value to long: " + pos_str);
+                        }
+                    }
+                }
+            }
+        }
+
+        size_t sparse_offset = sparse_config.compute_sparse_offset(reference_name, pos);
+        fseek(output_file, sparse_offset, SEEK_SET);
+        struct index_entry entry;
+        entry.reference_name_idx = ref_name_map.reference_to_int(reference_name);
+        entry.position = pos;
+        entry.byte_offset = line_byte_offset;
+        debugf("Writing entry to index %d %d %ld\n",
+            entry.reference_name_idx, entry.position, entry.byte_offset);
+        write_index_entry(output_file, &entry);
+
+        // Determine whether to write this entry to the index or whether it is inside the current bin
+        // if (line_number % index_configuration.entries_per_bin == 0) {
+        //     struct index_entry entry;
+        //     // char *endptr;
+        //     entry.reference_name_idx = ref_name_map.reference_to_int(reference_name.buf);
+        //     entry.position = pos;
+        //     entry.byte_offset = line_byte_offset;
+        //     debugf("Writing entry to index %d %d %ld\n",
+        //         entry.reference_name_idx, entry.position, entry.byte_offset);
+        //     write_index_entry(output_file, &entry);
+        // } else {
+        //     debugf("Not writing entry to index\n");
+        // }
+        line_number++;
+    }
+
+    fclose(output_file);
+    fclose(input_file);
+}
+
+void create_binning_index(const std::string& compressed_input_filename, const std::string& index_filename, VcfPackedBinningIndexConfiguration& index_configuration) {
+    FILE *input_file = fopen(compressed_input_filename.c_str(), "r");
+    if (input_file == NULL) {
+        perror("fopen");
+        throw std::runtime_error("Failed to open file: " + compressed_input_filename);
+    }
+    FILE *output_file = fopen(index_filename.c_str(), "w");
+    if (output_file == NULL) {
+        perror("fopen");
+        throw std::runtime_error("Failed to open output file: " + index_filename);
+    }
+
+    int status;
+    VcfCompressionSchema schema;
+    debugf("Parsing metadata lines and header line\n");
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    decompress2_metadata_headers(input_file, meta_header_lines, schema);
+
+    reference_name_map ref_name_map;
+
+    std::vector<byte_t> line_bytes;
+    line_bytes.reserve(16 * 1024);
+
+    // Counter to handle entries per bin
+    size_t line_number = 0;
+
+    // Iterate through lines of compressed file
+    long total_write_bytes = 0;
+    while (true) {
+        // long line_byte_offset = tellfd(input_fd);
+        long line_byte_offset = ftell(input_file);
+
+        debugf("Start of line, stream positioned so next byte is at position %ld (0x%08lx)\n",
+                line_byte_offset,
+                line_byte_offset);
+
+        compressed_line_length_headers line_length_headers;
+        memset(&line_length_headers, 0, sizeof(compressed_line_length_headers));
+        status = read_compressed_line_length_headers(input_file, &line_length_headers);
+        if (status == 0) {
+            debugf("Finished creating index\n");
+            break;
+        } else if (status != (int) compressed_line_length_headers_size) {
+            throw std::runtime_error("Failed to read line length headers");
+        }
+
+        uint64_t read_bytes = 4 + 4; // length headers
+
+        debugf("After length headers, stream positioned so next byte is at position %ld (0x%08lx)\n",
+                ftell(input_file),
+                ftell(input_file));
 
         uint8_t line_length_header_bytes[4];
         uint32_to_uint8_array(line_length_headers.line_length, line_length_header_bytes);
@@ -741,7 +920,10 @@ void create_binning_index(const std::string& compressed_input_filename, const st
             entry.byte_offset = line_byte_offset;
             debugf("Writing entry to index %d %d %ld\n",
                 entry.reference_name_idx, entry.position, entry.byte_offset);
-            write_index_entry(output_file, &entry);
+
+            long index_entry_bytes = write_index_entry(output_file, &entry);
+            total_write_bytes += index_entry_bytes;
+            debugf("Wrote %ld bytes to index, new size: %ld\n", index_entry_bytes, total_write_bytes);
         } else {
             debugf("Not writing entry to index\n");
         }
@@ -998,124 +1180,267 @@ int read_reference_name_and_pos(int input_fd, std::string *reference_name_out, u
 }
 
 
-// void query_binned_index_binarysearch(const std::string& compressed_filename, VcfCoordinateQuery query) {
-//     int status;
-//     #ifdef TIMING
-//     std::chrono::time_point<std::chrono::steady_clock> start;
-//     std::chrono::time_point<std::chrono::steady_clock> end;
-//     std::chrono::nanoseconds duration;
-//     #endif
+void query_binned_index_binarysearch(const std::string& compressed_filename, VcfCoordinateQuery query) {
+    int status;
+    #ifdef TIMING
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    #endif
 
-//     #ifdef TIMING
-//     start = std::chrono::steady_clock::now();
-//     #endif
-//     std::string index_filename = compressed_filename + VCFC_BINNING_INDEX_EXTENSION;
-//     int compressed_fd = open(compressed_filename.c_str(), O_RDONLY);
-//     if (compressed_fd < 0) {
-//         perror("open");
-//         debugf("Failed to open input file: %s\n", compressed_filename.c_str());
-//         return;
-//     }
-//     if (!file_exists(index_filename.c_str())) {
-//         // throw std::runtime_error("Failed to open index file: " + index_filename);
-//         debugf("Failed to open index file: %s\n", index_filename.c_str());
-//         return;
-//     }
-//     int index_fd = open(index_filename.c_str(), O_RDONLY);
-//     if (index_fd < 0) {
-//         perror("open");
-//         // throw std::runtime_error("Failed to open index file: " + index_filename);
-//         debugf("Failed to open index file: %s\n", index_filename.c_str());
-//         return;
-//     }
-//     #ifdef TIMING
-//     end = std::chrono::steady_clock::now();
-//     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-//     printf("file_open time: %lu\n", duration.count());
-//     #endif
+    std::string index_filename = compressed_filename + VCFC_BINNING_INDEX_EXTENSION;
+    debugf("Opening %s\n", compressed_filename.c_str());
+    FILE *compressed_file = fopen(compressed_filename.c_str(), "r");
+    if (compressed_file == NULL) {
+        perror("fopen");
+        debugf("Failed to open input file: %s\n", compressed_filename.c_str());
+        return;
+    }
+    debugf("Opening %s\n", index_filename.c_str());
+    FILE *index_file = fopen(index_filename.c_str(), "r");
+    if (index_file == NULL) {
+        perror("fopen");
+        debugf("Failed to open index file: %s\n", index_filename.c_str());
+        return;
+    }
 
-//     debugf("Parsing metadata lines and header line\n");
-//     VcfCompressionSchema schema;
-//     std::vector<std::string> meta_header_lines;
-//     meta_header_lines.reserve(256);
-//     decompress2_metadata_headers_fd(compressed_fd, meta_header_lines, schema);
+    debugf("Parsing metadata lines and header line\n");
+    VcfCompressionSchema schema;
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    decompress2_metadata_headers(compressed_file, meta_header_lines, schema);
 
-//     struct index_entry start_entry;
-//     memset(&start_entry, 0, sizeof(start_entry));
+    struct index_entry start_entry;
+    memset(&start_entry, 0, sizeof(start_entry));
 
-//     reference_name_map ref_name_map;
+    reference_name_map ref_name_map;
+    uint8_t query_reference_name_idx = ref_name_map.reference_to_int(query.get_reference_name());
 
-//     uint8_t query_reference_name_idx = ref_name_map.reference_to_int(query.get_reference_name());
+    // already checked file existence
+    long index_size = file_size(index_filename.c_str());
 
-//     // Find bin before the first bin start that matches the query
-//     long start_entry_address = 0;
-//     bool at_least_one_entry = false;
-//     struct index_entry entry;
-//     enum query_state {
-//         BEFORE_QUERY, IN_QUERY, AFTER_QUERY
-//     };
-//     enum query_state current_state = query_state::BEFORE_QUERY;
-//     int bytes_read;
-//     #ifdef TIMING
-//     start = std::chrono::steady_clock::now();
-//     #endif
-//     while (true) {
-//         size_t current_entry_address = tellfd(index_fd);
-//         if (read_index_entry(index_fd, &entry, &bytes_read) != 0) {
-//             debugf("Failed to read a full index_entry from index file");
-//             close(compressed_fd);
-//             close(index_fd);
-//             return;
-//             // throw std::runtime_error("Failed to read a full index_entry from index file");
-//         }
+    if (index_size % struct_index_entry_size != 0) {
+        throw std::runtime_error(string_format(
+            "Index size %ld was not a multiple of entry size: %ld",
+            index_size, struct_index_entry_size));
+    }
 
-//         at_least_one_entry = true;
-//         // This bin entry starts exactly at the query start range
-//         if (entry.reference_name_idx == query_reference_name_idx
-//                 && entry.position == query.get_start_position()) {
-//             debugf("Index bin starts exactly at start of query range\n");
-//             start_entry_address = current_entry_address;
-//             current_state = query_state::IN_QUERY; // starting in the query range already
-//             break;
-//         }
-//         // This bin entry is after the query start range, so should start before this
-//         else if (entry.reference_name_idx >= query_reference_name_idx
-//                 && entry.position >= query.get_start_position()) {
-//             debugf("Index bin is after the start of the query range\n");
-//             start_entry_address = current_entry_address;
-//             // If there is a preceeding bin, start there
-//             if (current_entry_address != 0) {
-//                 start_entry_address -= struct_index_entry_size;
-//                 lseek(index_fd, start_entry_address, SEEK_SET);
-//                 // re-read previous entry
-//                 debugf("Re-reading previous index entry\n");
-//                 if (read_index_entry(index_fd, &entry, &bytes_read) != 0) {
-//                     debugf("Failed to read a full index_entry from index file");
-//                     close(compressed_fd);
-//                     close(index_fd);
-//                     return;
-//                     // throw std::runtime_error("Failed to read a full index_entry from index file");
-//                 }
-//             }
-//             break;
-//         }
-//     }
-//     #ifdef TIMING
-//     end = std::chrono::steady_clock::now();
-//     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-//     printf("index_search time: %lu\n", duration.count());
-//     #endif
+    long entry_count = index_size / struct_index_entry_size;
+    debugf("Index of size %ld has %ld entries\n", index_size, entry_count);
 
-//     debugf("query start_entry_address = %ld\n", start_entry_address);
-//     #ifdef DEBUG
-//     int bin_idx = start_entry_address / struct_index_entry_size;
-//     debugf("bin_idx = %d\n", bin_idx);
-//     #endif
-//     // string_t linebuf;
-//     // string_reserve(&linebuf, 4 * 4096);
-//     std::string linebuf;
-//     linebuf.reserve(4 * 4096);
-// }
+    // Find bin before the first bin start that matches the query
+    // long start_entry_address = 0;
+
+    auto get_mid = [](long start, long end) -> int {
+        debugf("get_mid %ld, %ld\n", start, end);
+        if (start == end) {
+            return start;
+        } else if (start > end) {
+            throw std::runtime_error("start was greater than end");
+        } else {
+            return (int)((start + end) / 2);
+        }
+    };
+
+    // Entry index for binary search range
+    long search_start = 0;
+    long search_end = entry_count - 1;
+    long search_mid = get_mid(search_start, search_end);
+    struct index_entry entry;
+
+    // int bytes_read;
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    #endif
+    while (true) {
+        search_mid = get_mid(search_start, search_end);
+        long mid_offset = search_mid * struct_index_entry_size;
+        debugf("Search mid_index = %ld, mid_offset = %ld\n", search_mid, mid_offset);
+
+        fseek(index_file, mid_offset, SEEK_SET);
+
+        int bytes_read = 0;
+        if (read_index_entry(index_file, &entry, &bytes_read) != 0) {
+            debugf("Failed to read index entry from index file");
+            fclose(compressed_file);
+            fclose(index_file);
+            return;
+        }
+
+        if (search_start == search_end) {
+            // base case
+
+            // if entry is greater than query, go back one entry
+            if (search_mid > 0 &&
+                    (entry.reference_name_idx > query_reference_name_idx
+                        || (entry.reference_name_idx == query_reference_name_idx
+                            && entry.position >= query.get_start_position()))) {
+                search_mid = search_mid - 1;
+                long mid_offset = search_mid * struct_index_entry_size;
+                debugf("Search mid_index = %ld, mid_offset = %ld\n", search_mid, mid_offset);
+
+                fseek(index_file, mid_offset, SEEK_SET);
+
+                if (read_index_entry(index_file, &entry, &bytes_read) != 0) {
+                    debugf("Failed to read index entry from index file");
+                    fclose(compressed_file);
+                    fclose(index_file);
+                    return;
+                }
+            }
+            debugf("Found desired bin %ld\n", search_mid);
+            break;
+        }
+
+        debugf("entry reference_name_idx=%d, position=%u\n",
+            entry.reference_name_idx, entry.position);
+
+        // Read entry, determine if after or before query
+        if (entry.reference_name_idx == query_reference_name_idx
+                && entry.position == query.get_start_position()) {
+            // This bin entry starts exactly at the query start range
+            debugf("Entry is exactly at start of query range\n");
+            break;
+        }
+        // This bin entry is after the query start range, so search before
+        else if (entry.reference_name_idx > query_reference_name_idx
+                || (entry.reference_name_idx == query_reference_name_idx
+                        && entry.position >= query.get_start_position())) {
+            debugf("Entry is after the start of the query range\n");
+            search_end = search_mid - 1;
+        } else if (entry.reference_name_idx < query_reference_name_idx
+                || (entry.reference_name_idx == query_reference_name_idx
+                        && entry.position <= query.get_start_position())) {
+            debugf("Entry is before the start of the query range\n");
+            search_start = search_mid + 1;
+        } else {
+            throw std::runtime_error(
+                "Unknown state, index wasn't equal, greater, or less");
+        }
+
+        if (search_start >= search_end) {
+            break;
+        }
+    }
+
+    debugf("Got bin index %ld, reference = %d, pos = %d\n",
+        search_mid, entry.reference_name_idx, entry.position);
+
+
+
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("index_search time: %lu\n", duration.count());
+    #endif
+
+    // debugf("query start_entry_address = %ld\n", start_entry_address);
+    // #ifdef DEBUG
+    // int bin_idx = start_entry_address / struct_index_entry_size;
+    // debugf("bin_idx = %d\n", bin_idx);
+    // #endif
+
+    std::string linebuf;
+    linebuf.reserve(4 * 4096);
+
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    enum query_state {
+        BEFORE_QUERY, IN_QUERY, AFTER_QUERY
+    };
+    enum query_state current_state = query_state::BEFORE_QUERY;
+    #endif
+
+    if (entry_count > 0) {
+        debugf("entry reference_name_idx = %u, position = %u, byte_offset = %lu\n",
+            entry.reference_name_idx, entry.position, entry.byte_offset);
+
+        // Iterate through data file
+        fseek(compressed_file, entry.byte_offset, SEEK_SET);
+        // struct compressed_line_length_headers length_headers;
+
+        // Record the number of lines scanned before hitting the desired range
+        int before_count = 0;
+
+        while (true) {
+            linebuf.clear();
+            size_t compressed_line_length;
+            status = decompress2_data_line(compressed_file, schema, linebuf, &compressed_line_length);
+            if (status == 0) {
+                // EOF
+                debugf("End of input file\n");
+                break;
+            } else if (status < 0) {
+                throw VcfValidationError("Error, failed to read next line from compressed input file");
+            }
+            SplitIterator spi(linebuf, "\t");
+            if (!spi.has_next()) {
+                throw VcfValidationError("Line did not match expected schema\n");
+            }
+            std::string reference_name = spi.next();
+            if (!spi.has_next()) {
+                throw VcfValidationError("Line did not match expected schema\n");
+            }
+            std::string pos_str = spi.next();
+            bool conversion_success = false;
+            uint64_t pos = str_to_uint64(pos_str, conversion_success);
+            if (!conversion_success) {
+                throw VcfValidationError(("Failed to parse integer pos from " + pos_str).c_str());
+            }
+            debugf("Checking reference_name = %s, pos = %lu against query reference_name = %s, start = %lu, end = %lu\n",
+                reference_name.c_str(), pos, query.get_reference_name().c_str(), query.get_start_position(), query.get_end_position());
+
+            if (query.matches(reference_name, pos)) {
+                // If previous state was before, now not before, output decompress_seeking timer
+                #ifdef TIMING
+                if (current_state == query_state::BEFORE_QUERY) {
+                    end = std::chrono::steady_clock::now();
+                    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+                    printf("TIMING decompress_seeking: %lu\n", duration.count());
+                    start = std::chrono::steady_clock::now();
+                }
+                current_state = query_state::IN_QUERY;
+                #endif
+
+                debugf("Query matched line, outputting\n");
+                printf(linebuf.c_str());
+            } else if (pos > query.get_end_position()) {
+                #ifdef TIMING
+                // If previous state was before, now not before, output decompress_seeking timer
+                if (current_state == query_state::BEFORE_QUERY) {
+                    end = std::chrono::steady_clock::now();
+                    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+                    printf("TIMING decompress_seeking: %lu\n", duration.count());
+                    start = std::chrono::steady_clock::now();
+                }
+
+                current_state = query_state::AFTER_QUERY;
+                #endif
+
+                debugf("Query did not match, state is now AFTER_QUERY\n");
+                // debugf("Reached end of query range\n");
+                break;
+            } else if (pos < query.get_start_position()) {
+                debugf("Query did not match, state is still BEFORE_QUERY\n");
+                before_count++;
+                continue;
+            }
+        }
+        debugf("lines decompressed before query = %d\n", before_count);
+
+    } else {
+        debugf("Index was empty\n");
+    }
+
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("TIMING decompress_iteration: %lu\n", duration.count());
+    #endif
+
+    fclose(index_file);
+    fclose(compressed_file);
+}
 
 
 void query_binned_index_FILE(const std::string& compressed_filename, VcfCoordinateQuery query) {
@@ -1188,7 +1513,7 @@ void query_binned_index_FILE(const std::string& compressed_filename, VcfCoordina
     #endif
     while (true) {
         size_t current_entry_address = tellfd(index_fd);
-        if (read_index_entry(index_fd, &entry, &bytes_read) != 0) {
+        if (read_index_entry_fd(index_fd, &entry, &bytes_read) != 0) {
             debugf("Failed to read a full index_entry from index file");
             fclose(compressed_file);
             close(index_fd);
@@ -1216,7 +1541,7 @@ void query_binned_index_FILE(const std::string& compressed_filename, VcfCoordina
                 lseek(index_fd, start_entry_address, SEEK_SET);
                 // re-read previous entry
                 debugf("Re-reading previous index entry\n");
-                if (read_index_entry(index_fd, &entry, &bytes_read) != 0) {
+                if (read_index_entry_fd(index_fd, &entry, &bytes_read) != 0) {
                     debugf("Failed to read a full index_entry from index file");
                     fclose(compressed_file);
                     close(index_fd);
@@ -1410,7 +1735,7 @@ void query_binned_index(const std::string& compressed_filename, VcfCoordinateQue
     #endif
     while (true) {
         size_t current_entry_address = tellfd(index_fd);
-        if (read_index_entry(index_fd, &entry, &bytes_read) != 0) {
+        if (read_index_entry_fd(index_fd, &entry, &bytes_read) != 0) {
             debugf("Failed to read a full index_entry from index file");
             close(compressed_fd);
             close(index_fd);
@@ -1438,7 +1763,7 @@ void query_binned_index(const std::string& compressed_filename, VcfCoordinateQue
                 lseek(index_fd, start_entry_address, SEEK_SET);
                 // re-read previous entry
                 debugf("Re-reading previous index entry\n");
-                if (read_index_entry(index_fd, &entry, &bytes_read) != 0) {
+                if (read_index_entry_fd(index_fd, &entry, &bytes_read) != 0) {
                     debugf("Failed to read a full index_entry from index file");
                     close(compressed_fd);
                     close(index_fd);
@@ -1881,13 +2206,19 @@ int main(int argc, char **argv) {
         VcfPackedBinningIndexConfiguration index_configuration(bin_size);
         create_binning_index(input_filename, index_filename, index_configuration);
     } else if (action == "query-binned-index") {
+        if (argc < 4) {
+            printf("Usage: ./main query-binned-index <compressed-filename> <region>");
+            return 1;
+        }
         std::string input_filename(argv[2]);
         std::string index_filename = input_filename + VCFC_BINNING_INDEX_EXTENSION;
         if (!file_exists(input_filename.c_str())) {
             printf("Input file does not exist: %s\n", input_filename.c_str());
+            return 1;
         }
         if (!file_exists(index_filename.c_str())) {
             printf("Index file does not exist: %s\n", index_filename.c_str());
+            return 1;
         }
 
         std::string query_input(argv[3]);
@@ -1899,8 +2230,22 @@ int main(int argc, char **argv) {
         }
         debugf("query reference_name = %s, start = %lu, end = %lu\n",
             query.get_reference_name().c_str(), query.get_start_position(), query.get_end_position());
-        // query_binned_index(input_filename, query);
-        query_binned_index_FILE(input_filename, query);
+        // query_binned_index_FILE(input_filename, query);
+        query_binned_index_binarysearch(input_filename, query);
+    } else if (action == "create-sparse-index") {
+        if (argc != 4) {
+            printf("Usage: ./main create-sparse-index <compressed-filename>\n");
+            return 1;
+        }
+        std::string input_filename(argv[2]);
+        std::string index_filename = input_filename + VCFC_BINNING_INDEX_EXTENSION + "-sparse";
+
+        SparsificationConfiguration sparse_config;
+        // Drop multiplication factor from default of 4 to 1 since this is only storing index entries, not whole lines
+        sparse_config.multiplication_factor = 1;
+        create_sparse_binning_index(input_filename, index_filename, sparse_config);
+    } else if (action == "query-sparse-index") {
+
     }
     else {
         std::cout << "Unknown action name: " << action << std::endl;

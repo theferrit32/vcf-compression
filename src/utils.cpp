@@ -242,3 +242,24 @@ bool file_exists(const char *filename) {
     int status = stat(filename, &statbuf);
     return status == 0;
 }
+
+long file_size(const char *filename) {
+    // struct stat statbuf;
+    // memset(&statbuf, 0, sizeof(struct stat));
+    // int status = stat(filename, &statbuf);
+    // if (status < 0) {
+    //     return status;
+    // }
+    // // unlikely to overflow
+    // return statbuf.st_size;
+
+    FILE *file = fopen(filename, "r");
+    if (file == NULL) {
+        return -1;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        return -1;
+    }
+    long size = ftell(file);
+    return size;
+}
