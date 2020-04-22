@@ -24,7 +24,7 @@ typedef uint8_t byte_t;
     #define debugf(...) {}
 #endif
 
-#define DEFAULT_FILE_CREATE_FLAGS (O_CREAT | O_TRUNC | O_WRONLY)
+#define DEFAULT_FILE_CREATE_FLAGS (O_CREAT | O_TRUNC | O_RDWR)
 #define DEFAULT_FILE_CREATE_MODE (S_IRUSR | S_IWUSR)
 #define VCFC_BINNING_INDEX_EXTENSION ".vcfci"
 
@@ -180,7 +180,7 @@ public:
     }
 
     void serialize(uint8_t out[4]) {
-        out[0] = this->extension_count | this->length_bytes[0];
+        out[0] = ((this->extension_count << 6) & 0xC0) | this->length_bytes[0];
         out[1] = this->length_bytes[1];
         out[2] = this->length_bytes[2];
         out[3] = this->length_bytes[3];

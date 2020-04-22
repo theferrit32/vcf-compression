@@ -506,6 +506,8 @@ int decompress2_data_line_FILEwrapper(
     // input_fd_dup is automatically closed when input_file is closed.
     int input_fd_dup = dup(input_fd);
     FILE *input_file = fdopen(input_fd_dup, "r");
+    debugf("offsets input_fd = %ld, input_fd_dup = %ld, input_file = %ld\n",
+        tellfd(input_fd), tellfd(input_fd_dup), ftell(input_file));
 
     int status = decompress2_data_line(input_file, schema, linebuf, compressed_line_length);
 
@@ -758,24 +760,21 @@ int decompress2_data_line(
     start = std::chrono::steady_clock::now();
     #endif
 
-    // Create FILE* wrapper of input_fd to improve small read performance.
-    // input_fd_dup is automatically closed when input_file is closed.
-    // int input_fd_dup = dup(input_fd);
-    // FILE *input_file = fdopen(input_fd_dup, "r");
-
-
     // keep track of how many columns we've seen
     size_t line_byte_count = 0;
     size_t line_tab_count = 0;
     size_t line_sample_count = 0;
-    if (feof(input_file)) {
-        debugf("%s, no data in input_fd\n", __FUNCTION__);
-        return 0;
-    }
     struct compressed_line_length_headers line_length_headers;
     memset(&line_length_headers, 0, sizeof(struct compressed_line_length_headers));
 
-    read_compressed_line_length_headers(input_file, &line_length_headers);
+    int status = read_compressed_line_length_headers(input_file, &line_length_headers);
+    if (status == 0 && feof(input_file)) {
+        debugf("%s, no data in input_fd\n", __FUNCTION__);
+        return 0;
+    } else if (status < (long) sizeof(struct compressed_line_length_headers)) {
+        debugf("Unknown error when reading compressed line length headers: %d\n", status);
+        return 0;
+    }
     line_byte_count += compressed_line_length_headers_size;
 
     uint32_t required_length = line_length_headers.required_columns_length;

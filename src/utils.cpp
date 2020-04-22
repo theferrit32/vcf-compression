@@ -258,8 +258,10 @@ long file_size(const char *filename) {
         return -1;
     }
     if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
         return -1;
     }
     long size = ftell(file);
+    fclose(file);
     return size;
 }

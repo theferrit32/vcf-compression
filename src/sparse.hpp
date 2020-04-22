@@ -5,8 +5,15 @@
 #include <string>
 
 #include <fcntl.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <limits.h>
 
 #include "compress.hpp"
+
+#define VCFC_SPARSE_MULTIPLE_REF_PER_FILE false
+
 
 class SparsificationConfiguration {
 public:
@@ -30,6 +37,7 @@ private:
     //std::map<std::string,uint8_t> n_map;
 };
 
-void sparsify_file_fd(const std::string& compressed_input_filename, const std::string& sparse_filename);
+// void sparsify_file_fd(const std::string& compressed_input_filename, const std::string& sparse_filename);
+void sparsify_file(const std::string& compressed_input_filename, const std::string& sparse_filename);
 
 #endif

@@ -24,6 +24,9 @@
 #include "sparse.hpp"
 #include "string_t.h"
 
+#define SPARSE_EXTERNAL_INDEX_BLOCK_SIZE 256
+
+
 int usage() {
     std::cerr << "./main [compress|decompress|sparsify] <input_file> <output_file>" << std::endl;
     return 1;
@@ -56,6 +59,19 @@ public:
             has_start_position(false),
             has_end_position(false) {}
 
+    VcfCoordinateQuery& operator=(const VcfCoordinateQuery& rhs) {
+        this->reference_name = rhs.reference_name;
+        this->start_position = rhs.start_position;
+        this->end_position = rhs.end_position;
+        this->has_start_position = rhs.has_start_position;
+        this->has_end_position = rhs.has_end_position;
+        // this->ref_name_map = rhs.ref_name_map;
+        return *this;
+    }
+
+    /**
+     * Returns true if the input values are within the range of this query
+     */
     bool matches(const std::string& reference_name, uint64_t position) {
         if (this->reference_name.size() > 0 && this->reference_name != reference_name) {
             return false;
@@ -68,6 +84,41 @@ public:
         }
         return true;
     }
+
+    int compare_to(const std::string& reference_name, uint64_t position) {
+        uint8_t input_reference_name_idx = this->ref_name_map.reference_to_int(reference_name);
+        uint8_t this_reference_name_idx = this->ref_name_map.reference_to_int(this->reference_name);
+
+        // This is greater than arguments
+        if (input_reference_name_idx < this_reference_name_idx
+                || (input_reference_name_idx == this_reference_name_idx
+                        && position < this->start_position)) {
+            return 1;
+        }
+        // This is less than arguments
+        else if (input_reference_name_idx > this_reference_name_idx
+                || (input_reference_name_idx == this_reference_name_idx
+                        && position > this->end_position)) {
+            return -1;
+        }
+        // This is equal to (within range of) arguments
+        else {
+            return 0;
+        }
+    }
+
+    // TODO no has_*_position checks here
+    // bool after(const std::string& reference_name, uint64_t position) {
+    //     uint8_t input_reference_name_idx = this->ref_name_map.reference_to_int(reference_name);
+    //     uint8_t this_reference_name_idx = this->ref_name_map.reference_to_int(reference_name);
+
+    //     if (input_reference_name_idx > this_reference_name_idx
+    //             || (input_reference_name_idx == this_reference_name_idx
+    //                     && position >= this->end_position)) {
+    //         return true;
+    //     }
+    //     return false;
+    // }
 
     bool has_criteria() {
         return this->reference_name.size() > 0
@@ -93,6 +144,7 @@ private:
     uint64_t end_position;
     bool has_start_position;
     bool has_end_position;
+    reference_name_map ref_name_map;
 };
 
 class VcfLineStateMachine {
@@ -156,7 +208,7 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
         perror("open");
         throw std::runtime_error("Failed to open file: " + input_filename);
     }
-
+    off_t lseek_ret = 0;
     VcfCompressionSchema schema;
     debugf("Parsing metadata lines and header line\n");
     std::vector<std::string> meta_header_lines;
@@ -178,13 +230,14 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
     // Leave default sparse config
     SparsificationConfiguration sparse_config;
 
-    long off = lseek(input_fd, 0, SEEK_CUR);
+    long off = tellfd(input_fd);
     if (off < 0) {
         throw std::runtime_error("ftell failed: " + std::to_string(off));
     }
     long data_start_offset = off + 8;
     uint64_t first_line_offset = 0;
-    if (read(input_fd, &first_line_offset, sizeof(uint64_t) == 0)) {
+    debugf("Reading first line offset value from file offset %ld\n", tellfd(input_fd));
+    if (read(input_fd, &first_line_offset, sizeof(uint64_t)) < (int)sizeof(uint64_t)) {
         throw std::runtime_error("Failed to read first_line_offset value from file");
     }
 
@@ -196,9 +249,16 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
         debugf("Single variant lookup\n");
         size_t variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_start_position());
 
-        debugf("variant_offset = %lu, file_offset = %lu\n", variant_offset, data_start_offset + variant_offset);
+        off64_t new_offset = data_start_offset + variant_offset;
+        debugf("variant_offset = %lu, file_offset = %lu\n", variant_offset, new_offset);
 
-        long initial_lookup_offset = lseek(input_fd, data_start_offset + variant_offset, SEEK_SET);
+        loff_t initial_lookup_offset = lseek64(input_fd, new_offset, SEEK_SET);
+        debugf("initial_lookup_offset = %ld\n", initial_lookup_offset);
+        if (initial_lookup_offset != new_offset) {
+            perror("lseek");
+            debugf("Failed to seek to line in file\n");
+            return;
+        }
 
         union {
             struct {
@@ -271,38 +331,50 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
                 // lseek(input_fd, -previous_viable_line_distance, SEEK_CUR);
                 // debugf("Seeked backwards previous_viable_line_distance = %ld\n", previous_viable_line_distance);
 
-                lseek(input_fd, next_viable_line_distance, SEEK_CUR);
-                debugf("Seeked forwards next_viable_line_distance = %ld\n", next_viable_line_distance);
+                lseek_ret = lseek(input_fd, next_viable_line_distance, SEEK_CUR);
+                debugf("Seeked forwards next_viable_line_distance = %ld to %ld\n", next_viable_line_distance, tellfd(input_fd));
             }
         }
 
         // Determine if the current offset corresponds to a data line, if not, seek to the next one
         while (true) {
-            union {
-                struct {
-                    uint64_t distance_to_previous;
-                    uint64_t distance_to_next;
-                } lengths;
-                uint8_t bytes[16];
-            } _length_headers;
-            if (read(input_fd, &_length_headers.bytes, 16) == 0) {
-                throw std::runtime_error("Reached end of file unexpectedly");
+            // union {
+            //     struct {
+            //         uint64_t distance_to_previous;
+            //         uint64_t distance_to_next;
+            //     } lengths;
+            //     uint8_t bytes[16];
+            // } _length_headers;
+            // if (read(input_fd, &_length_headers.bytes, 16) == 0) {
+            //     throw std::runtime_error("Reached end of file unexpectedly");
+            // }
+            // debugf("distance_to_previous = %lu, distance_to_next = %lu\n",
+            //     _length_headers.lengths.distance_to_previous, _length_headers.lengths.distance_to_next);
+            uint8_t distance_headers[16];
+            memset(distance_headers, 0, 16);
+
+            if (read(input_fd, distance_headers, 16) < 16) {
+                throw std::runtime_error("Reached end of file unexpectedly when reading distance headers");
             }
-            debugf("distance_to_previous = %lu, distance_to_next = %lu\n",
-                _length_headers.lengths.distance_to_previous, _length_headers.lengths.distance_to_next);
+            uint64_t distance_to_previous = 0, distance_to_next = 0;
+            uint8_array_to_uint64(distance_headers, &distance_to_previous);
+            uint8_array_to_uint64(distance_headers + 8, &distance_to_next);
+            debugf("distance_to_previous = %lu (0x%08lx), distance_to_next = %lu (0x%08lx)\n",
+                distance_to_previous, distance_to_previous, distance_to_next, distance_to_next);
 
             // IF prev offset value is zero and this is not the first line, must be an invalid location
-            if (_length_headers.lengths.distance_to_previous == 0 &&
+            if (distance_to_previous == 0 &&
                     initial_lookup_offset != (long)(first_line_offset + data_start_offset)) {
                 // seek ahead to next viable line start
                 long seek_distance = sparse_config.multiplication_factor * sparse_config.block_size;
                 seek_distance -= 16; // Already read this many bytes
-                lseek(input_fd, seek_distance, SEEK_CUR);
+                lseek64(input_fd, seek_distance, SEEK_CUR);
                 debugf("Offset %ld was not a data line, seeked to next viable offset %ld\n",
-                    tellfd(input_fd) + 16 - seek_distance, tellfd(input_fd));
+                    tellfd(input_fd) + 16 - seek_distance, // same as initial_lookup_offset
+                    tellfd(input_fd));
             } else {
                 debugf("Offset was a data location, begin linear traversal\n");
-                lseek(input_fd, -16, SEEK_CUR);
+                lseek64(input_fd, -16, SEEK_CUR);
                 break;
             }
         }
@@ -312,10 +384,8 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
         // max offset of the beginning of the last matching variant line
         // size_t end_variant_offset = sparse_config.compute_sparse_offset(query.get_reference_name(), query.get_end_position());
 
-        // string_t linebuf;
-        // string_reserve(&linebuf, 4 * 1024);
         std::string linebuf;
-        linebuf.reserve(4 * 1024);
+        linebuf.reserve(16 * 1024);
         size_t linelength;
         debugf("Starting linear variant enumeration from reference = %s %lu to %lu\n",
                 query.get_reference_name().c_str(),
@@ -324,20 +394,30 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
 
         while (true) {
             // Important
-            // string_clear(&linebuf);
             linebuf.clear();
-
-            uint64_t distance_to_previous, distance_to_next;
-            // size_t line_start_offset = lseek(input_fd, 0, SEEK_CUR);
             size_t line_start_offset = tellfd(input_fd);
-            if (read(input_fd, &distance_to_previous, sizeof(uint64_t)) <= 0) {
-                throw std::runtime_error("couldn't read from file");
-            }
-            if (read(input_fd, &distance_to_next, sizeof(uint64_t)) <= 0) {
-                throw std::runtime_error("couldn't read from file");
-            }
+            debugf("line_start_offset = %lu\n", line_start_offset);
 
-            debugf("distance_to_previous = %lu, distance_to_next = %lu\n", distance_to_previous, distance_to_next);
+            // uint64_t distance_to_previous, distance_to_next;
+            // if (read(input_fd, &distance_to_previous, sizeof(uint64_t)) <= 0) {
+            //     throw std::runtime_error("couldn't read from file");
+            // }
+            // if (read(input_fd, &distance_to_next, sizeof(uint64_t)) <= 0) {
+            //     throw std::runtime_error("couldn't read from file");
+            // }
+            // debugf("distance_to_previous = %lu, distance_to_next = %lu\n", distance_to_previous, distance_to_next);
+
+            uint8_t distance_headers[16];
+            memset(distance_headers, 0, 16);
+
+            if (read(input_fd, distance_headers, 16) < 16) {
+                throw std::runtime_error("Reached end of file unexpectedly when reading distance headers");
+            }
+            uint64_t distance_to_previous = 0, distance_to_next = 0;
+            uint8_array_to_uint64(distance_headers, &distance_to_previous);
+            uint8_array_to_uint64(distance_headers + 8, &distance_to_next);
+            debugf("distance_to_previous = %lu (0x%08lx), distance_to_next = %lu (0x%08lx)\n",
+                distance_to_previous, distance_to_previous, distance_to_next, distance_to_next);
 
             // Not positioned at a data line
             if (distance_to_previous == 0 && distance_to_next == 0) {
@@ -351,7 +431,7 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
             #ifdef TIMING
             start = std::chrono::steady_clock::now();
             #endif
-            debugf("current offset: %ld\n", lseek(input_fd, 0, SEEK_CUR));
+            debugf("current offset: %ld\n", tellfd(input_fd));
             int status = decompress2_data_line_FILEwrapper(input_fd, schema, linebuf, &linelength);
             #ifdef TIMING
             end = std::chrono::steady_clock::now();
@@ -430,7 +510,7 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
                     #ifdef TIMING
                     start = std::chrono::steady_clock::now();
                     #endif
-                    lseek(input_fd, distance_to_next, SEEK_CUR);
+                    lseek64(input_fd, distance_to_next, SEEK_CUR);
                     #ifdef TIMING
                     end = std::chrono::steady_clock::now();
                     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
@@ -607,6 +687,14 @@ void create_sparse_binning_index(
         throw std::runtime_error("Failed to open output file: " + index_filename);
     }
 
+    // write one byte at beginning of file
+    char c = 'A';
+    fwrite(&c, 1, 1, output_file);
+
+    // SparsificationConfiguration sparse_config;
+    // sparse_config.multiplication_factor = 1;
+    // sparse_config.block_size = 1024;
+
     int status;
     VcfCompressionSchema schema;
     debugf("Parsing metadata lines and header line\n");
@@ -646,15 +734,10 @@ void create_sparse_binning_index(
                 ftell(input_file),
                 ftell(input_file));
 
-        // LineLengthHeader line_length_header;
-        // line_length_header.set_extension_count(3); // TODO interpret
-        // line_length_header.deserialize(line_length_header_bytes);
-
         uint8_t line_length_header_bytes[4];
         uint32_to_uint8_array(line_length_headers.line_length, line_length_header_bytes);
         uint8_t required_columns_length_header_bytes[4];
         uint32_to_uint8_array(line_length_headers.required_columns_length, required_columns_length_header_bytes);
-
 
         debugf("Line length: %d\n", line_length_headers.line_length);
 
@@ -683,14 +766,10 @@ void create_sparse_binning_index(
 
         // keep track of some column values as we go across, for offset calculation
         bool got_reference_name = false;
-        // string_t reference_name;
-        // string_reserve(&reference_name, 32);
         std::string reference_name;
         reference_name.reserve(32);
 
         bool got_pos = false;
-        // string_t pos_str;
-        // string_reserve(&pos_str, 32);
         std::string pos_str;
         pos_str.reserve(32);
 
@@ -700,7 +779,6 @@ void create_sparse_binning_index(
         // subtract 4 due to length of required_columns_length_header_bytes, which are already read
         while (i++ < line_length_headers.line_length - 4) {
             unsigned char b;
-            // if (read(input_fd, &b, 1) <= 0) {
             if (fread(&b, 1, 1, input_file) < 1) {
                 std::string msg = string_format(
                     "Unexpectedly reached end of compressed file, line header said %d, but only read %d bytes from line",
@@ -711,7 +789,6 @@ void create_sparse_binning_index(
 
             if (!got_reference_name) {
                 if (b != '\t') {
-                    // string_appendc(&reference_name, b);
                     reference_name.push_back(b);
                 } else {
                     if (reference_name.size() == 0) {
@@ -769,6 +846,258 @@ void create_sparse_binning_index(
     fclose(output_file);
     fclose(input_file);
 }
+
+
+void query_sparse_binned_index(
+        const std::string& compressed_filename,
+        const std::string& index_filename,
+        VcfCoordinateQuery& query,
+        SparsificationConfiguration& sparse_config) {
+    int status;
+    off_t lseek_ret;
+    #ifdef TIMING
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    #endif
+
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    #endif
+    debugf("Opening compressed file\n");
+    FILE *compressed_file = fopen(compressed_filename.c_str(), "r");
+    if (compressed_file == NULL) {
+        perror("fopen");
+        debugf("Failed to open input file: %s\n", compressed_filename.c_str());
+        return;
+    }
+    debugf("Successfully opened file\n");
+    if (!file_exists(index_filename.c_str())) {
+        // throw std::runtime_error("Failed to open index file: " + index_filename);
+        debugf("Failed to open index file: %s\n", index_filename.c_str());
+        return;
+    }
+    debugf("Opening index file\n");
+    int index_fd = open(index_filename.c_str(), O_RDONLY);
+    if (index_fd < 0) {
+        perror("open");
+        // throw std::runtime_error("Failed to open index file: " + index_filename);
+        debugf("Failed to open index file: %s\n", index_filename.c_str());
+        return;
+    }
+
+    // test SEEK_DATA
+    off_t test_seek_data_offset = 10000000;
+    lseek_ret = lseek(index_fd, test_seek_data_offset, SEEK_DATA);
+    if (lseek_ret < 0) {
+        perror("fseek");
+        debugf("SEEK_DATA failed: %ld\n", lseek_ret);
+        return;
+    }
+
+
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("TIMING file_open: %lu\n", duration.count());
+    #endif
+
+    debugf("Parsing metadata lines and header line\n");
+    VcfCompressionSchema schema;
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    decompress2_metadata_headers(compressed_file, meta_header_lines, schema);
+
+    struct index_entry start_entry;
+    memset(&start_entry, 0, sizeof(start_entry));
+
+    reference_name_map ref_name_map;
+
+    // uint8_t query_reference_name_idx = ref_name_map.reference_to_int(query.get_reference_name());
+
+    size_t sparse_offset_s = sparse_config.compute_sparse_offset(
+        query.get_reference_name(), query.get_start_position());
+    long sparse_offset = (long) sparse_offset_s;
+    long index_size = file_size(index_filename.c_str());
+    long entry_count = index_size / struct_index_entry_size;
+    debugf("Index of size %ld has %ld entries\n", index_size, entry_count);
+
+    debugf("Seeking to offset %ld\n", sparse_offset);
+    lseek_ret = lseek(index_fd, sparse_offset, SEEK_SET);
+    if (lseek_ret != sparse_offset) {
+        perror("lseek");
+        debugf("Failed to seek to offset %ld, returned %ld\n", sparse_offset, lseek_ret);
+        return;
+    }
+
+    struct index_entry entry;
+    memset(&entry, 0, sizeof(struct index_entry));
+
+    // Try to read an entry
+    int bytes_read = 0;
+    if (read_index_entry_fd(index_fd, &entry, &bytes_read) != 0) {
+        debugf("Failed to read index entry from file\n");
+        fclose(compressed_file);
+        close(index_fd);
+        return;
+    }
+
+    // Not realistically possible given semantic constraints on values
+    if (entry.reference_name_idx == 0 && entry.position == 0 && entry.byte_offset == 0) {
+        debugf("Entry was empty, looking for next available entry\n");
+
+        // Determine if in a hole
+        long current_offset = tellfd(index_fd);
+        debugf("Calling SEEK_DATA from offset %ld\n", current_offset);
+        lseek_ret = lseek(index_fd, current_offset, SEEK_DATA);
+        if (lseek_ret < 0) { // new_offset is same as lseek_ret
+            perror("fseek");
+            debugf("Failed to fseek SEEK_DATA, status = %ld\n", lseek_ret);
+            return;
+        }
+        long new_offset = tellfd(index_fd);
+        debugf("SEEK_DATA moved offset from %ld to %ld\n", current_offset, new_offset);
+        if (new_offset != current_offset) {
+            // was in a hole
+            debugf("Was in a hole, now is not\n");
+        }
+
+        // Brute search ahead
+        while (true) {
+            debugf("Searching ahead for non empty index\n");
+            long offset_before = tellfd(index_fd);
+            if (read_index_entry_fd(index_fd, &entry, &bytes_read) != 0) {
+                debugf("Failed to read index entry from file\n");
+                fclose(compressed_file);
+                close(index_fd);
+                return;
+            }
+            // long offset_after = tellfd(index_fd);
+
+            if (entry.reference_name_idx == 0 && entry.position == 0 && entry.byte_offset == 0) {
+                long next_viable_entry_address = offset_before + SPARSE_EXTERNAL_INDEX_BLOCK_SIZE;
+                debugf("Entry still empty, seeking ahead %ld bytes to address %ld\n",
+                    next_viable_entry_address - tellfd(index_fd), next_viable_entry_address);
+                lseek_ret = lseek(index_fd, next_viable_entry_address, SEEK_SET);
+                if (lseek_ret != next_viable_entry_address) {
+                    perror("lseek");
+                    debugf("Could not seek to next viable entry address\n");
+                }
+                continue;
+            } else {
+                debugf("Found non empty entry\n");
+                break;
+            }
+        }
+    }
+
+    debugf("Found index entry reference_name = %u, position = %u, byte_offset = %lu\n",
+        entry.reference_name_idx, entry.position, entry.byte_offset);
+
+    std::string linebuf;
+    linebuf.reserve(16 * 4096);
+
+
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    enum query_state {
+        BEFORE_QUERY, IN_QUERY, AFTER_QUERY
+    };
+    enum query_state current_state = query_state::BEFORE_QUERY;
+    #endif
+
+    if (entry_count > 0) {
+        debugf("entry reference_name_idx = %u, position = %u, byte_offset = %lu\n",
+            entry.reference_name_idx, entry.position, entry.byte_offset);
+
+        // Iterate through data file
+        fseek(compressed_file, entry.byte_offset, SEEK_SET);
+
+        // Record the number of lines scanned before hitting the desired range
+        int before_count = 0;
+
+        while (true) {
+            linebuf.clear();
+            size_t compressed_line_length;
+            status = decompress2_data_line(compressed_file, schema, linebuf, &compressed_line_length);
+            if (status == 0) {
+                // EOF
+                debugf("End of input file\n");
+                break;
+            } else if (status < 0) {
+                throw VcfValidationError("Error, failed to read next line from compressed input file");
+            }
+            SplitIterator spi(linebuf, "\t");
+            if (!spi.has_next()) {
+                throw VcfValidationError("Line did not match expected schema\n");
+            }
+            std::string reference_name = spi.next();
+            if (!spi.has_next()) {
+                throw VcfValidationError("Line did not match expected schema\n");
+            }
+            std::string pos_str = spi.next();
+            bool conversion_success = false;
+            uint64_t pos = str_to_uint64(pos_str, conversion_success);
+            if (!conversion_success) {
+                throw VcfValidationError(("Failed to parse integer pos from " + pos_str).c_str());
+            }
+            debugf("Checking reference_name = %s, pos = %lu against query reference_name = %s, start = %lu, end = %lu\n",
+                reference_name.c_str(), pos, query.get_reference_name().c_str(), query.get_start_position(), query.get_end_position());
+
+            int query_comparison = query.compare_to(reference_name, pos);
+            if (query_comparison > 0) {
+                // still before query
+                debugf("Query did not match, state is still BEFORE_QUERY\n");
+                before_count++;
+                continue;
+            } else if (query_comparison == 0) {
+                debugf("State is in range of query\n");
+                #ifdef TIMING
+                if (current_state == query_state::BEFORE_QUERY) {
+                    end = std::chrono::steady_clock::now();
+                    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+                    printf("TIMING decompress_seeking: %lu\n", duration.count());
+                    start = std::chrono::steady_clock::now();
+                }
+                current_state = query_state::IN_QUERY;
+                #endif
+                printf(linebuf.c_str());
+            } else if (query_comparison < 0) {
+                debugf("State is after query\n");
+                // after query
+                #ifdef TIMING
+                // If previous state was before, now not before, output decompress_seeking timer
+                if (current_state == query_state::BEFORE_QUERY) {
+                    end = std::chrono::steady_clock::now();
+                    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+                    printf("TIMING decompress_seeking: %lu\n", duration.count());
+                    start = std::chrono::steady_clock::now();
+                }
+
+                current_state = query_state::AFTER_QUERY;
+                #endif
+                break;
+
+            } else {
+                throw std::runtime_error("Invalid state, query could not be compared");
+            }
+        }
+        debugf("lines decompressed before query = %d\n", before_count);
+
+    } else {
+        debugf("Index was empty\n");
+    }
+
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("TIMING decompress_iteration: %lu\n", duration.count());
+    #endif
+
+    close(index_fd);
+    fclose(compressed_file);
+}
+
 
 void create_binning_index(const std::string& compressed_input_filename, const std::string& index_filename, VcfPackedBinningIndexConfiguration& index_configuration) {
     FILE *input_file = fopen(compressed_input_filename.c_str(), "r");
@@ -1267,7 +1596,7 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
             return;
         }
 
-        if (search_start == search_end) {
+        if (search_start >= search_end) {
             // base case
 
             // if entry is greater than query, go back one entry
@@ -1308,19 +1637,22 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
                         && entry.position >= query.get_start_position())) {
             debugf("Entry is after the start of the query range\n");
             search_end = search_mid - 1;
+            debugf("Updated search_end to %ld\n", search_end);
         } else if (entry.reference_name_idx < query_reference_name_idx
                 || (entry.reference_name_idx == query_reference_name_idx
                         && entry.position <= query.get_start_position())) {
             debugf("Entry is before the start of the query range\n");
             search_start = search_mid + 1;
+            debugf("Updated search_start to %ld\n", search_start);
         } else {
             throw std::runtime_error(
                 "Unknown state, index wasn't equal, greater, or less");
         }
 
-        if (search_start >= search_end) {
-            break;
-        }
+        // if (search_start >= search_end) {
+        //     search_mid = search_end;
+        //     break;
+        // }
     }
 
     debugf("Got bin index %ld, reference = %d, pos = %d\n",
@@ -1334,12 +1666,6 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
     printf("index_search time: %lu\n", duration.count());
     #endif
 
-    // debugf("query start_entry_address = %ld\n", start_entry_address);
-    // #ifdef DEBUG
-    // int bin_idx = start_entry_address / struct_index_entry_size;
-    // debugf("bin_idx = %d\n", bin_idx);
-    // #endif
-
     std::string linebuf;
     linebuf.reserve(4 * 4096);
 
@@ -1351,11 +1677,11 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
     enum query_state current_state = query_state::BEFORE_QUERY;
     #endif
 
-    if (entry_count > 0) {
+    if (entry_count > 0) { // unnecessary check, would have failed earlier
         debugf("entry reference_name_idx = %u, position = %u, byte_offset = %lu\n",
             entry.reference_name_idx, entry.position, entry.byte_offset);
 
-        // Iterate through data file
+        // Iterate through data file from entry.byte_offset
         fseek(compressed_file, entry.byte_offset, SEEK_SET);
         // struct compressed_line_length_headers length_headers;
 
@@ -2176,7 +2502,7 @@ int main(int argc, char **argv) {
         if (!file_exists(input_filename.c_str())) {
             printf("Input file does not exist: %s\n", input_filename.c_str());
         }
-        sparsify_file_fd(input_filename, output_filename);
+        sparsify_file(input_filename, output_filename);
     } else if (action == "sparse-query") {
         std::string input_filename(argv[2]);
         std::string query_input(argv[3]);
@@ -2233,18 +2559,41 @@ int main(int argc, char **argv) {
         // query_binned_index_FILE(input_filename, query);
         query_binned_index_binarysearch(input_filename, query);
     } else if (action == "create-sparse-index") {
-        if (argc != 4) {
+        if (argc != 3) {
             printf("Usage: ./main create-sparse-index <compressed-filename>\n");
             return 1;
         }
         std::string input_filename(argv[2]);
         std::string index_filename = input_filename + VCFC_BINNING_INDEX_EXTENSION + "-sparse";
 
-        SparsificationConfiguration sparse_config;
         // Drop multiplication factor from default of 4 to 1 since this is only storing index entries, not whole lines
+        SparsificationConfiguration sparse_config;
         sparse_config.multiplication_factor = 1;
+        sparse_config.block_size = SPARSE_EXTERNAL_INDEX_BLOCK_SIZE;
+
         create_sparse_binning_index(input_filename, index_filename, sparse_config);
     } else if (action == "query-sparse-index") {
+        if (argc != 4) {
+            printf("Usage: ./main query-sparse-index <compressed-filename> <region>\n");
+            return 1;
+        }
+        std::string input_filename(argv[2]);
+        std::string index_filename = input_filename + VCFC_BINNING_INDEX_EXTENSION + "-sparse";
+        std::string query_input(argv[3]);
+        VcfCoordinateQuery query;
+        status = parse_coordinate_string(query_input, query);
+        if (status != 0) {
+            printf("Failed to parse query string: %s\n", query_input.c_str());
+            return 1;
+        }
+
+        // Drop multiplication factor from default of 4 to 1 since this is only storing index entries, not whole lines
+        SparsificationConfiguration sparse_config;
+        sparse_config.multiplication_factor = 1;
+        sparse_config.block_size = SPARSE_EXTERNAL_INDEX_BLOCK_SIZE;
+        query_sparse_binned_index(input_filename, index_filename, query, sparse_config);
+    }
+    else if (action == "query-sparse-index") {
 
     }
     else {
