@@ -16,6 +16,7 @@ def flush_cache():
 
 def time_cmd(cmd_args) -> float:
     flush_cache()
+    print(cmd_args)
     start_time = time.time()
     # TODO see if capturing stderr in PIPE has any measurable impact. Should only
     # store content on error, in which case we don't care as much about accurate time anyways.
