@@ -50,13 +50,14 @@ min_pos = 16050075
 max_pos = 51244237
 
 # Chromosome 1
-# vcfc_filename = '/mnt/ext4/backup/ALL.chr22.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.vcfc'
-# sparse_filename = vcfc_filename + '.sparse'
-# bgzip_filename = '/mnt/ext4/ALL.chr22.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz'
-# bcf_filename = '/mnt/ext4/ALL.chr22.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.bcf'
-# reference_name = '1'
-# min_pos = 16050075
-# max_pos = 51244237
+file_directory = '/mnt/ext4'
+vcfc_filename = file_directory + '/ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.vcfc'
+sparse_filename = vcfc_filename + '.sparse'
+bgzip_filename = file_directory + '/ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz'
+bcf_filename = file_directory + '/ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.bcf'
+reference_name = '1'
+min_pos = 10177
+max_pos = 249240543
 
 
 
@@ -100,7 +101,7 @@ def measure_binned_index_creation_time():
     }
 
 def graph_binned_index_creation_time(measurements):
-    measurement = measurements['data']['vcfc_binned_index_creation_time']
+    measurement = measurements['data']['vcfc_binned_index_creation_time']['data']
     xvals = [m['bin_size'] for m in measurement]
     yvals = [m['time'] for m in measurement]
     errs = [m['stddev'] for m in measurement]
@@ -236,7 +237,7 @@ def measure_binned_index_range_queries(query_range:int=10000, queries:int=100):
                 config, vcfc_filename, reference_name, pos, end_pos))
 
         vcfc_durations.append({
-            'start_position': min_pos,
+            'start_position': pos,
             'end_position': end_pos,
             'time': sum(durs)/len(durs),
             'stddev': np.std(durs)
@@ -256,7 +257,7 @@ def measure_binned_index_range_queries(query_range:int=10000, queries:int=100):
         for _ in range(test_runs):
             durs.append(run_tabix(config, bgzip_filename, reference_name, pos, end_pos))
         tabix_bgzip_durations.append({
-            'start_position': min_pos,
+            'start_position': pos,
             'end_position': end_pos,
             'time': sum(durs)/len(durs),
             'stddev': np.std(durs)
@@ -276,7 +277,7 @@ def measure_binned_index_range_queries(query_range:int=10000, queries:int=100):
         for _ in range(test_runs):
             durs.append(run_tabix(config, bcf_filename, reference_name, pos, end_pos))
         tabix_bcf_durations.append({
-            'start_position': min_pos,
+            'start_position': pos,
             'end_position': end_pos,
             'time': sum(durs)/len(durs),
             'stddev': np.std(durs)
@@ -446,7 +447,7 @@ def measure_sparse_range_queries(query_range:int=10000, queries:int=100):
             durs.append(run_vcfc_sparse_query(config, sparse_filename, reference_name, pos, end_pos))
 
         sparse_durations.append({
-            'start_position': min_pos,
+            'start_position': pos,
             'end_position': end_pos,
             'time': sum(durs)/len(durs),
             'stddev': np.std(durs)
@@ -466,7 +467,7 @@ def measure_sparse_range_queries(query_range:int=10000, queries:int=100):
         for _ in range(test_runs):
             durs.append(run_tabix(config, bgzip_filename, reference_name, pos, end_pos))
         tabix_bgzip_durations.append({
-            'start_position': min_pos,
+            'start_position': pos,
             'end_position': end_pos,
             'time': sum(durs)/len(durs),
             'stddev': np.std(durs)
@@ -486,7 +487,7 @@ def measure_sparse_range_queries(query_range:int=10000, queries:int=100):
         for _ in range(test_runs):
             durs.append(run_tabix(config, bcf_filename, reference_name, pos, end_pos))
         tabix_bcf_durations.append({
-            'start_position': min_pos,
+            'start_position': pos,
             'end_position': end_pos,
             'time': sum(durs)/len(durs),
             'stddev': np.std(durs)

@@ -1,4 +1,5 @@
 CPP_FLAGS = -Wall -std=c++11 -D_GNU_SOURCE
+flag = -D_FILE_OFFSET_BITS=64
 
 SOURCE = src/main.cpp src/utils.cpp \
 	src/compress.cpp src/sparse.cpp \
@@ -29,3 +30,6 @@ uniqc: src/uniqc.cpp
 
 clean:
 	rm -f main main_debug main_release main_timing
+
+test: test.cpp
+	g++ $(CPP_FLAGS) -DDEBUG -DTIMING -o test test.cpp
