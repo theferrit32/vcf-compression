@@ -330,8 +330,14 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
 
                 // lseek(input_fd, -previous_viable_line_distance, SEEK_CUR);
                 // debugf("Seeked backwards previous_viable_line_distance = %ld\n", previous_viable_line_distance);
-
+                off_t current_offset = tellfd(input_fd);
                 lseek_ret = lseek(input_fd, next_viable_line_distance, SEEK_CUR);
+                if (lseek_ret != next_viable_line_distance + current_offset) {
+                    perror("lseek");
+                    debugf("Could not seek to next viable line address %ld, got %ld\n",
+                        next_viable_line_distance + current_offset, lseek_ret);
+                    return;
+                }
                 debugf("Seeked forwards next_viable_line_distance = %ld to %ld\n", next_viable_line_distance, tellfd(input_fd));
             }
         }
@@ -681,19 +687,15 @@ void create_sparse_binning_index(
         perror("fopen");
         throw std::runtime_error("Failed to open file: " + compressed_input_filename);
     }
-    FILE *output_file = fopen(index_filename.c_str(), "w");
-    if (output_file < 0) {
-        perror("fopen");
+    int output_fd = open(index_filename.c_str(), DEFAULT_FILE_CREATE_FLAGS, DEFAULT_FILE_CREATE_MODE);
+    if (output_fd < 0) {
+        perror("open");
         throw std::runtime_error("Failed to open output file: " + index_filename);
     }
 
     // write one byte at beginning of file
-    char c = 'A';
-    fwrite(&c, 1, 1, output_file);
-
-    // SparsificationConfiguration sparse_config;
-    // sparse_config.multiplication_factor = 1;
-    // sparse_config.block_size = 1024;
+    // char c = 'A';
+    // fwrite(&c, 1, 1, output_file);
 
     int status;
     VcfCompressionSchema schema;
@@ -818,14 +820,19 @@ void create_sparse_binning_index(
         }
 
         size_t sparse_offset = sparse_config.compute_sparse_offset(reference_name, pos);
-        fseek(output_file, sparse_offset, SEEK_SET);
+        off_t lseek_ret = lseek(output_fd, sparse_offset, SEEK_SET);
+        if (lseek_ret != (off_t) sparse_offset) {
+            perror("lseek");
+            debugf("Failed to seek to offset %ld, got %ld\n", sparse_offset, lseek_ret);
+            return;
+        }
         struct index_entry entry;
         entry.reference_name_idx = ref_name_map.reference_to_int(reference_name);
         entry.position = pos;
         entry.byte_offset = line_byte_offset;
         debugf("Writing entry to index %d %d %ld\n",
             entry.reference_name_idx, entry.position, entry.byte_offset);
-        write_index_entry(output_file, &entry);
+        write_index_entry_fd(output_fd, &entry);
 
         // Determine whether to write this entry to the index or whether it is inside the current bin
         // if (line_number % index_configuration.entries_per_bin == 0) {
@@ -843,7 +850,7 @@ void create_sparse_binning_index(
         line_number++;
     }
 
-    fclose(output_file);
+    close(output_fd);
     fclose(input_file);
 }
 

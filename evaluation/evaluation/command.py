@@ -26,7 +26,20 @@ def time_cmd(cmd_args) -> float:
     duration = round(end_time - start_time, 6)
     return duration
 
+def create_tabix_index(config:Config, filename:str) -> float:
+    if not os.path.exists(filename):
+        raise RuntimeError('%s does not exist' % filename)
+    cmd_args = [
+        config.tabix_command_path,
+        '-f',
+        filename
+    ]
+    return time_cmd(cmd_args)
+
+
 def run_tabix(config:Config, filename:str, ref:str, start:int, end:int) -> float:
+    if not os.path.exists(filename):
+        raise RuntimeError('%s does not exist' % filename)
     cmd_args = [
         config.tabix_command_path,
         filename,
@@ -34,7 +47,19 @@ def run_tabix(config:Config, filename:str, ref:str, start:int, end:int) -> float
     ]
     return time_cmd(cmd_args)
 
+
+def create_vcfc_sparse_file(config:Config, filename:str) -> float:
+    if not os.path.exists(filename):
+        raise RuntimeError('%s does not exist' % filename)
+    cmd_args = [
+        config.get_vcfc_release_cmd(),
+
+    ]
+
+
 def run_vcfc_sparse_query(config:Config, filename:str, ref:str, start:int, end:int) -> float:
+    if not os.path.exists(filename):
+        raise RuntimeError('%s does not exist' % filename)
     cmd_args = [
         config.get_vcfc_release_cmd(),
         'sparse-query',
@@ -42,6 +67,7 @@ def run_vcfc_sparse_query(config:Config, filename:str, ref:str, start:int, end:i
         '%s:%d-%d' % (ref, start, end)
     ]
     return time_cmd(cmd_args)
+
 
 def create_binned_index(config:Config, filename:str, bin_size:int) -> float:
     cmd_args = [
@@ -61,6 +87,32 @@ def run_vcfc_binned_index_query(config:Config, filename:str, ref:str, start:int,
     cmd_args = [
         config.get_vcfc_release_cmd(),
         'query-binned-index',
+        filename,
+        '%s:%d-%d' % (ref, start, end)
+    ]
+    return time_cmd(cmd_args)
+
+
+def create_vcfc_sparse_external_index(config:Config, filename:str) -> float:
+    if not os.path.exists(filename):
+        raise RuntimeError('%s does not exist' % filename)
+    cmd_args = [
+        config.get_vcfc_release_cmd(),
+        'create-sparse-index',
+        filename,
+        # '%s:%d-%d' % (ref, start, end)
+    ]
+    return time_cmd(cmd_args)
+
+def run_vcfc_sparse_external_index_query(config:Config, filename:str, ref:str, start:int, end:int) -> float:
+    if not os.path.exists(filename):
+        raise RuntimeError('%s does not exist' % filename)
+    if not os.path.exists(filename + '.vcfci-sparse'):
+        raise RuntimeError('%s does not exist' % (filename + '.vcfci-sparse'))
+
+    cmd_args = [
+        config.get_vcfc_release_cmd(),
+        'query-sparse-index',
         filename,
         '%s:%d-%d' % (ref, start, end)
     ]

@@ -2,14 +2,14 @@
 set -ex
 #python3 ~/vcf-compression/evaluation/range_query.py measure-binned-timing-profile-range
 
-cd ~/vcf-compression/evaluation
+evaluation_root=~/vcf-compression/evaluation
 
 function run_measure {
   if [[ -z "$1" ]]; then
     echo "Must pass a test name"
     exit 1
   fi
-  python3 -u range_query.py "$1" measure | tee "${1}.log"
+  python3 -u ${evaluation_root}/evaluation_main.py "$1" measure | tee "${1}.log"
 }
 
 if [[ -z "$1" ]]; then
@@ -28,8 +28,3 @@ run_measure "$1"
 # run_measure binned-timing-profile-range
 
 echo "Finished run"
-
-# while true; do
-#   sleep infinity
-# done
-
