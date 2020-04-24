@@ -253,7 +253,9 @@ std::string vector_join(std::vector<std::string>& v, std::string delim);
 
 void push_string_to_byte_vector(std::vector<byte_t>& v, const std::string& s);
 std::string byte_vector_to_string(const std::vector<byte_t>& v);
+
 uint64_t str_to_uint64(const std::string& s, bool& success);
+int str_to_long(const std::string& s, long *out);
 
 void uint64_to_uint8_array(uint64_t val, uint8_t bytes[8]);
 void uint8_array_to_uint64(uint8_t bytes[8], uint64_t *val);

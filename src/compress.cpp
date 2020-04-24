@@ -451,7 +451,7 @@ const std::string get_or_set_decompressed_cache(
         #ifdef TIMING
         end = std::chrono::steady_clock::now();
         duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-        printf("TIMING get_or_set_decompressed_cache: %lu\n", duration.count());
+        // printf("TIMING get_or_set_decompressed_cache: %lu\n", duration.count());
         #endif
         return cache_line;
     }
@@ -465,14 +465,14 @@ const std::string get_or_set_decompressed_cache(
             #ifdef TIMING
             end = std::chrono::steady_clock::now();
             duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-            printf("TIMING get_or_set_decompressed_cache: %lu\n", duration.count());
+            // printf("TIMING get_or_set_decompressed_cache: %lu\n", duration.count());
             #endif
             return cache_line;
         } else {
             #ifdef TIMING
             end = std::chrono::steady_clock::now();
             duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-            printf("TIMING get_or_set_decompressed_cache: %lu\n", duration.count());
+            // printf("TIMING get_or_set_decompressed_cache: %lu\n", duration.count());
             #endif
             return run_vector[run_length];
         }
@@ -843,7 +843,7 @@ int decompress2_data_line(
         if ((b & SAMPLE_MASK_00) == SAMPLE_MASKED_00) {
             // is a 0|0 column
             uint8_t count = (b & (~SAMPLE_MASK_00)) & 0xFF; // and with inverse of flag mask
-            debugf("0|0 repeat count: %u\n", count);
+            // debugf("0|0 repeat count: %u\n", count);
 
             // uint8_t counter = count;
             // while (counter--) {
@@ -921,7 +921,7 @@ int decompress2_data_line(
 
             // write the sample GT and increment counters
             uint8_t count = (b & (~SAMPLE_MASK_01_10_11)) & 0xFF;
-            debugf("Got %s, count: %u\n", sample_str->c_str(), count);
+            // debugf("Got %s, count: %u\n", sample_str->c_str(), count);
 
 
             // const std::string& cache_line = get_or_set_decompressed_cache(*sample_str, count);

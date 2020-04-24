@@ -107,6 +107,36 @@ public:
         }
     }
 
+    int compare_to_range(const std::string& reference_name, uint64_t start_input, uint64_t end_input) {
+        uint8_t input_reference_name_idx = this->ref_name_map.reference_to_int(reference_name);
+        uint8_t this_reference_name_idx = this->ref_name_map.reference_to_int(this->reference_name);
+        int ret = 0;
+
+        // This is greater than arguments
+        if (input_reference_name_idx < this_reference_name_idx
+                || (input_reference_name_idx == this_reference_name_idx
+                        && end_input < this->start_position)) {
+            ret = 1;
+        }
+        // This is less than arguments
+        else if (input_reference_name_idx > this_reference_name_idx
+                || (input_reference_name_idx == this_reference_name_idx
+                        && start_input > this->end_position)) {
+            ret = -1;
+        }
+        // This is equal to (within range of) arguments
+        else {
+            ret = 0;
+        }
+        debugf("%s query(%s, %lu, %lu) - input(%s, %lu, %lu): %d\n",
+            __FUNCTION__,
+            this->reference_name.c_str(), this->start_position, this->end_position,
+            reference_name.c_str(), start_input, end_input,
+            ret);
+        return ret;
+    }
+
+
     // TODO no has_*_position checks here
     // bool after(const std::string& reference_name, uint64_t position) {
     //     uint8_t input_reference_name_idx = this->ref_name_map.reference_to_int(reference_name);
@@ -1105,8 +1135,430 @@ void query_sparse_binned_index(
     fclose(compressed_file);
 }
 
+long read_to(FILE *input_file, unsigned char end, bool remove_end, std::string& out) {
+    unsigned char cur = 0;
+    long counter = 0;
+    while (fread(&cur, 1, 1, input_file) == 1) {
+        counter++;
+        if (cur != end) {
+            out.push_back(reinterpret_cast<char&>(cur));
+        } else {
+            if (!remove_end) {
+                off_t fseek_ret = fseek(input_file, -1, SEEK_CUR);
+                if (fseek_ret != 0) {
+                    return -1;
+                }
+                return counter - 1;
+            }
+            return counter;
+        }
+    }
+    return -1;
+}
 
-void create_binning_index(const std::string& compressed_input_filename, const std::string& index_filename, VcfPackedBinningIndexConfiguration& index_configuration) {
+int parse_kvp(const std::string& input, std::map<std::string,std::string>& output_map) {
+    const std::vector<std::string> pairs = split_string(input, ";");
+    for (size_t pair_i = 0; pair_i < pairs.size(); pair_i++) {
+        const std::string& pair = pairs[pair_i];
+        const std::vector<std::string> parts = split_string(pair, "=");
+        if (parts.size() == 2) {
+            const std::string& key = parts[0];
+            const std::string& val = parts[1];
+            // No duplicate checking
+            output_map[key] = val;
+        } else if (parts.size() == 1) {
+            const std::string& key = parts[0];
+            const std::string& val = "";
+            // No duplicate checking
+            output_map[key] = val;
+        } else {
+            throw std::runtime_error("Invalid kvp format: " + input);
+        }
+    }
+    return 0;
+}
+
+bool alt_is_structural(const std::string& alt) {
+    return alt.find('<') != std::string::npos;
+}
+
+long compute_end_position(
+        long pos,
+        const std::string& reference_name,
+        const std::string& alt,
+        const std::string& info) {
+    long read_to_ret = 0;
+    long end_position = 0;
+    // debugf("ID=%s\n", id.c_str());
+    // debugf("REF=%s\n", ref.c_str());
+    debugf("ALT=%s\n", alt.c_str());
+
+    if (alt_is_structural(alt)) {
+        debugf("ALT is structural: %s\n", alt.c_str());
+        // std::string info;
+        debugf("INFO=%s\n", info.c_str());
+        std::map<std::string,std::string> info_kvp;
+        if (parse_kvp(info, info_kvp) < 0) {
+            throw std::runtime_error("Failed to parse info kvp");
+        }
+        std::string svtype = info_kvp["SVTYPE"];
+        debugf("Structural variant type: %s\n", svtype.c_str());
+
+        // SV without END info: SVA, ALU (alt begins with: <INS:)
+        if (info_kvp.count("END")) {
+            long end;
+            std::vector<std::string> end_strings = split_string(info_kvp["END"], ",");
+            long max_end = 0;
+            for (auto iter = end_strings.begin(); iter != end_strings.end(); iter++) {
+                if (str_to_long(*iter, &end) != 0) {
+                    throw std::runtime_error("Failed to parse END integer: " + *iter);
+                }
+                if (end > max_end) {
+                    max_end = end;
+                }
+            }
+            end_position = std::abs(max_end);
+        } else if (info_kvp.count("SVLEN")) {
+            long svlen = 0, max_svlen = 0;
+            std::vector<std::string> svlen_strings = split_string(info_kvp["SVLEN"], ",");
+            for (size_t i = 0; i < svlen_strings.size(); i++) {
+                if (str_to_long(svlen_strings[i], &svlen) != 0) {
+                    throw std::runtime_error("Failed to parse SVLEN integer: " + svlen_strings[i]);
+                }
+                // Using abs to handle INS types, and DEL, DUP together
+                if (std::abs(svlen) > max_svlen) {
+                    max_svlen = std::abs(svlen);
+                }
+            }
+            end_position = pos + max_svlen - 1;
+        } else {
+            debugf("Could not find END or SVLEN to determine end position of structural variant, using start_position\n");
+            end_position = pos;
+        }
+
+    } else {
+        debugf("Non structural variant\n");
+        std::vector<std::string> alts = split_string(alt, ",");
+        size_t max_alt_size = 0;
+        for (auto iter = alts.begin(); iter != alts.end(); iter++) {
+            if (iter->size() > max_alt_size) {
+                max_alt_size = iter->size();
+            }
+        }
+        // POS plus longest region, either insertion or deletion
+        // end_position = pos + std::abs((long)(reference_name.size() - max_alt_size));
+        if (reference_name.size() >= max_alt_size) {
+            end_position = pos + reference_name.size();
+        } else {
+            end_position = pos + max_alt_size - 1;
+        }
+    }
+    return end_position;
+}
+
+void create_binned_index2(
+        const std::string& compressed_input_filename,
+        const std::string& index_filename,
+        VcfPackedBinningIndexConfiguration& index_configuration) {
+    FILE *input_file = fopen(compressed_input_filename.c_str(), "r");
+    if (input_file == NULL) {
+        perror("fopen");
+        throw std::runtime_error("Failed to open file: " + compressed_input_filename);
+    }
+    FILE *output_file = fopen(index_filename.c_str(), "w");
+    if (output_file == NULL) {
+        perror("fopen");
+        throw std::runtime_error("Failed to open output file: " + index_filename);
+    }
+
+    int status;
+    VcfCompressionSchema schema;
+    debugf("Parsing metadata lines and header line\n");
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    decompress2_metadata_headers(input_file, meta_header_lines, schema);
+
+    reference_name_map ref_name_map;
+
+    std::vector<byte_t> line_bytes;
+    line_bytes.reserve(16 * 1024);
+
+    // Counter to handle entries per bin
+    size_t line_number = 0;
+
+    // Iterate through lines of compressed file
+    // long total_write_bytes = 0;
+
+    // keep map of binned position -> end_position, index entry
+    std::map<size_t,std::pair<size_t,struct index_entry>> index_map;
+
+
+    while (true) {
+        long line_byte_offset = ftell(input_file);
+
+        debugf("Start of line, stream positioned so next byte is at position %ld (0x%08lx)\n",
+                line_byte_offset,
+                line_byte_offset);
+
+        compressed_line_length_headers line_length_headers;
+        memset(&line_length_headers, 0, sizeof(compressed_line_length_headers));
+        status = read_compressed_line_length_headers(input_file, &line_length_headers);
+        if (status == 0) {
+            debugf("Finished creating index\n");
+            break;
+        } else if (status != (int) compressed_line_length_headers_size) {
+            throw std::runtime_error("Failed to read line length headers");
+        }
+
+        uint64_t read_bytes = 4 + 4; // length headers
+
+        debugf("After length headers, stream positioned so next byte is at position %ld (0x%08lx)\n",
+                ftell(input_file),
+                ftell(input_file));
+
+        uint8_t line_length_header_bytes[4];
+        uint32_to_uint8_array(line_length_headers.line_length, line_length_header_bytes);
+        uint8_t required_columns_length_header_bytes[4];
+        uint32_to_uint8_array(line_length_headers.required_columns_length, required_columns_length_header_bytes);
+        debugf("Line length: %d\n", line_length_headers.line_length);
+
+        // collect bytes to end of line
+        // size_t i = 0;
+        line_bytes.clear();
+        // if (line_bytes.capacity() < line_length_headers.line_length + read_bytes) {
+        //     line_bytes.reserve(line_length_headers.line_length + read_bytes);
+        // }
+
+        // // two uint64 placeholders for diffs to previous, next line
+        // for (size_t placeholder_i = 0; placeholder_i < 16; placeholder_i++) {
+        //     line_bytes.push_back(0);
+        // }
+
+        // line_bytes.push_back(line_length_header_bytes[0]);
+        // line_bytes.push_back(line_length_header_bytes[1]);
+        // line_bytes.push_back(line_length_header_bytes[2]);
+        // line_bytes.push_back(line_length_header_bytes[3]);
+        // line_bytes.push_back(required_columns_length_header_bytes[0]);
+        // line_bytes.push_back(required_columns_length_header_bytes[1]);
+        // line_bytes.push_back(required_columns_length_header_bytes[2]);
+        // line_bytes.push_back(required_columns_length_header_bytes[3]);
+        // debugf("line_bytes with headers only: %s\n", byte_vector_to_string(line_bytes).c_str());
+
+        // keep track of some column values as we go across, for offset calculation
+        // bool got_reference_name = false;
+        std::string reference_name;
+        reference_name.reserve(32);
+
+        // bool got_pos = false;
+        std::string pos_str;
+        pos_str.reserve(32);
+        size_t pos = 0;
+        size_t end_position = 0;
+
+        long read_to_ret;
+        read_to_ret = read_to(input_file, '\t', true, reference_name);
+        if (read_to_ret <= 0) {
+            throw std::runtime_error("Failed to read reference name");
+        }
+        read_to_ret = read_to(input_file, '\t', true, pos_str);
+        if (read_to_ret <= 0) {
+            throw std::runtime_error("Failed to read position");
+        }
+        bool success;
+        pos = str_to_uint64(pos_str, success);
+        if (!success) {
+            throw std::runtime_error("Failed to parse pos: " + pos_str);
+        }
+        std::string id;
+        read_to_ret = read_to(input_file, '\t', true, id);
+        std::string ref;
+        read_to_ret = read_to(input_file, '\t', true, ref);
+        std::string alt;
+        read_to_ret = read_to(input_file, '\t', true, alt);
+
+
+        std::string info;
+        std::string qual;
+        std::string filter;
+        if (read_to(input_file, '\t', true, qual) <= 0) {
+            throw std::runtime_error("Failed to read qual");
+        }
+        if (read_to(input_file, '\t', true, filter) <= 0) {
+            throw std::runtime_error("Failed to read filter");
+        }
+        if (read_to(input_file, '\t', true, info) <= 0) {
+            throw std::runtime_error("Failed to read info");
+        }
+        debugf("CHR=%s\n", reference_name.c_str());
+        debugf("POS=%s\n", pos_str.c_str());
+        debugf("ID=%s\n", id.c_str());
+        debugf("REF=%s\n", ref.c_str());
+        debugf("ALT=%s\n", alt.c_str());
+        debugf("QUAL=%s\n", qual.c_str());
+        debugf("FILTER=%s\n", filter.c_str());
+        debugf("INFO=%s\n", info.c_str());
+
+        end_position = compute_end_position(pos, reference_name, alt, info);
+
+        // if (alt_is_structural(alt)) {
+        //     debugf("ALT is structural: %s\n", alt.c_str());
+        //     std::string info;
+        //     std::string qual;
+        //     std::string filter;
+        //     if (read_to(input_file, '\t', true, qual) <= 0) {
+        //         throw std::runtime_error("Failed to read qual");
+        //     }
+        //     if (read_to(input_file, '\t', true, filter) <= 0) {
+        //         throw std::runtime_error("Failed to read filter");
+        //     }
+        //     if (read_to(input_file, '\t', true, info) <= 0) {
+        //         throw std::runtime_error("Failed to read info");
+        //     }
+        //     debugf("QUAL=%s\n", qual.c_str());
+        //     debugf("FILTER=%s\n", filter.c_str());
+        //     debugf("INFO=%s\n", info.c_str());
+        //     std::map<std::string,std::string> info_kvp;
+        //     if (parse_kvp(info, info_kvp) < 0) {
+        //         throw std::runtime_error("Failed to parse info kvp");
+        //     }
+        //     std::string svtype = info_kvp["SVTYPE"];
+        //     debugf("Structural variant type: %s\n", svtype.c_str());
+
+        //     // SV without END info: SVA, ALU (alt begins with: <INS:)
+        //     if (info_kvp.count("END")) {
+        //         long end;
+        //         std::vector<std::string> end_strings = split_string(info_kvp["END"], ",");
+        //         long max_end = 0;
+        //         for (auto iter = end_strings.begin(); iter != end_strings.end(); iter++) {
+        //             if (str_to_long(*iter, &end) != 0) {
+        //                 throw std::runtime_error("Failed to parse END integer: " + *iter);
+        //             }
+        //             if (end > max_end) {
+        //                 max_end = end;
+        //             }
+        //         }
+        //         end_position = std::abs(max_end);
+        //     } else if (info_kvp.count("SVLEN")) {
+        //         long svlen = 0, max_svlen = 0;
+        //         std::vector<std::string> svlen_strings = split_string(info_kvp["SVLEN"], ",");
+        //         for (size_t i = 0; i < svlen_strings.size(); i++) {
+        //             if (str_to_long(svlen_strings[i], &svlen) != 0) {
+        //                 throw std::runtime_error("Failed to parse SVLEN integer: " + svlen_strings[i]);
+        //             }
+        //             // Using abs to handle INS types, and DEL, DUP together
+        //             if (std::abs(svlen) > max_svlen) {
+        //                 max_svlen = std::abs(svlen);
+        //             }
+        //         }
+        //         end_position = pos + max_svlen - 1;
+        //     } else {
+        //         debugf("Could not find END or SVLEN to determine end position of structural variant, using start_position\n");
+        //         end_position = pos;
+        //     }
+
+        // } else {
+        //     debugf("Non structural variant\n");
+        //     std::vector<std::string> alts = split_string(alt, ",");
+        //     size_t max_alt_size = 0;
+        //     for (auto iter = alts.begin(); iter != alts.end(); iter++) {
+        //         if (iter->size() > max_alt_size) {
+        //             max_alt_size = iter->size();
+        //         }
+        //     }
+        //     // POS plus longest region, either insertion or deletion
+        //     // end_position = pos + std::abs((long)(reference_name.size() - max_alt_size));
+        //     if (reference_name.size() >= max_alt_size) {
+        //         end_position = pos + reference_name.size();
+        //     } else {
+        //         end_position = pos + max_alt_size;
+        //     }
+        // }
+
+        // insert index entries for every position between [pos, end_position]
+        // keep map of binned position -> index entry
+
+        // insert or update index entries which exist if this for this positional range [pos, end_position]
+
+        uint8_t reference_name_idx = ref_name_map.reference_to_int(reference_name);
+
+        size_t map_max_start_position = 0;
+        size_t map_max_end_position = 0;
+        if (index_map.size() != 0) {
+            const std::pair<size_t,std::pair<size_t,struct index_entry>> max_index_map_entry = *(index_map.rbegin());
+            map_max_start_position = max_index_map_entry.first;
+            map_max_end_position = max_index_map_entry.second.first;
+            debugf("index current max position = %lu\n", map_max_start_position);
+
+        }
+
+        size_t first_index_position_to_write;
+        if (pos >= map_max_start_position) {
+            first_index_position_to_write = pos;
+        } else {
+            first_index_position_to_write = map_max_start_position;
+        }
+
+        // if (first_index_position_to_write <= end_position) {
+            size_t count = (size_t) ((end_position - first_index_position_to_write) / index_configuration.entries_per_bin);
+            count += 1; // allow trailing fragment for rounding in above calculation
+
+            for (
+                    size_t index_position = first_index_position_to_write;
+                    index_position <= (end_position + count*index_configuration.entries_per_bin);
+                    index_position += index_configuration.entries_per_bin) {
+                struct index_entry new_entry;
+                new_entry.reference_name_idx = reference_name_idx;
+                new_entry.position = index_position; // starting position for a query
+                new_entry.byte_offset = line_byte_offset;
+                debugf("Inserting new index ref_idx=%d, entry start=%u, end=%lu, byte_offset=%lu\n",
+                    new_entry.reference_name_idx, new_entry.position, end_position, new_entry.byte_offset);
+                index_map[index_position] = std::pair<size_t,struct index_entry>(end_position, new_entry);
+            }
+        // }
+
+
+        // Determine whether to write this entry to the index or whether it is inside the current bin
+        // if (line_number % index_configuration.entries_per_bin == 0) {
+        //     struct index_entry entry;
+        //     // char *endptr;
+        //     entry.reference_name_idx = ref_name_map.reference_to_int(reference_name);
+        //     entry.position = pos;
+        //     entry.byte_offset = line_byte_offset;
+        //     debugf("Writing entry to index %d %d %ld\n",
+        //         entry.reference_name_idx, entry.position, entry.byte_offset);
+
+        //     long index_entry_bytes = write_index_entry(output_file, &entry);
+        //     total_write_bytes += index_entry_bytes;
+        //     debugf("Wrote %ld bytes to index, new size: %ld\n", index_entry_bytes, total_write_bytes);
+        // } else {
+        //     debugf("Not writing entry to index\n");
+        // }
+        line_number++;
+
+        // TODO seek to next line
+        long next_line_distance = line_length_headers.line_length - (ftell(input_file) - line_byte_offset);
+        next_line_distance += 4; // include line_length header bytes itself
+        debugf("Line length is %u, currently have read %ld bytes, seeking ahead %ld more\n",
+            line_length_headers.line_length, ftell(input_file) - line_byte_offset, next_line_distance);
+        off_t fseek_ret = fseek(input_file, next_line_distance, SEEK_CUR);
+        if (fseek_ret != 0) {
+            throw std::runtime_error(string_format(
+                "Failed to seek forward %ld bytes to offset %ld\n",
+                next_line_distance, ftell(input_file) + next_line_distance));
+        }
+    }
+
+    for (auto iter = index_map.begin(); iter != index_map.end(); iter++) {
+        struct index_entry entry = iter->second.second;
+        write_index_entry(output_file, &entry);
+    }
+
+    fclose(output_file);
+    fclose(input_file);
+}
+
+
+void create_binned_index(const std::string& compressed_input_filename, const std::string& index_filename, VcfPackedBinningIndexConfiguration& index_configuration) {
     FILE *input_file = fopen(compressed_input_filename.c_str(), "r");
     if (input_file == NULL) {
         perror("fopen");
@@ -1246,6 +1698,7 @@ void create_binning_index(const std::string& compressed_input_filename, const st
                 }
             }
         }
+
 
         // Determine whether to write this entry to the index or whether it is inside the current bin
         if (line_number % index_configuration.entries_per_bin == 0) {
@@ -1641,13 +2094,17 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
         // This bin entry is after the query start range, so search before
         else if (entry.reference_name_idx > query_reference_name_idx
                 || (entry.reference_name_idx == query_reference_name_idx
-                        && entry.position >= query.get_start_position())) {
+                        && entry.position > query.get_start_position())) {
             debugf("Entry is after the start of the query range\n");
+            if (search_mid == 0) {
+                debugf("Query starts before start of index, use first index entry\n");
+                break;
+            }
             search_end = search_mid - 1;
             debugf("Updated search_end to %ld\n", search_end);
         } else if (entry.reference_name_idx < query_reference_name_idx
                 || (entry.reference_name_idx == query_reference_name_idx
-                        && entry.position <= query.get_start_position())) {
+                        && entry.position < query.get_start_position())) {
             debugf("Entry is before the start of the query range\n");
             search_start = search_mid + 1;
             debugf("Updated search_start to %ld\n", search_start);
@@ -1720,10 +2177,28 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
             if (!conversion_success) {
                 throw VcfValidationError(("Failed to parse integer pos from " + pos_str).c_str());
             }
+
+            std::string id = spi.next();
+            std::string ref = spi.next();
+            std::string alt = spi.next();
+            // TODO optimize, dont need these if alt is not structural
+            std::string qual = spi.next();
+            std::string filter = spi.next();
+            std::string info = spi.next();
+
+            long end_position = compute_end_position(
+                (long) pos,
+                reference_name,
+                alt,
+                info);
+
             debugf("Checking reference_name = %s, pos = %lu against query reference_name = %s, start = %lu, end = %lu\n",
                 reference_name.c_str(), pos, query.get_reference_name().c_str(), query.get_start_position(), query.get_end_position());
 
-            if (query.matches(reference_name, pos)) {
+            int query_compare_to_line = query.compare_to_range(reference_name, pos, end_position);
+
+            // if (query.matches(reference_name, pos)) {
+            if (query_compare_to_line == 0 ) {
                 // If previous state was before, now not before, output decompress_seeking timer
                 #ifdef TIMING
                 if (current_state == query_state::BEFORE_QUERY) {
@@ -1737,7 +2212,8 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
 
                 debugf("Query matched line, outputting\n");
                 printf(linebuf.c_str());
-            } else if (pos > query.get_end_position()) {
+            // } else if (pos > query.get_end_position()) {
+            } else if (query_compare_to_line < 0) { // line is after query
                 #ifdef TIMING
                 // If previous state was before, now not before, output decompress_seeking timer
                 if (current_state == query_state::BEFORE_QUERY) {
@@ -1753,7 +2229,8 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
                 debugf("Query did not match, state is now AFTER_QUERY\n");
                 // debugf("Reached end of query range\n");
                 break;
-            } else if (pos < query.get_start_position()) {
+            // } else if (pos < query.get_start_position()) {
+            } else if (query_compare_to_line > 0) { // line is before query
                 debugf("Query did not match, state is still BEFORE_QUERY\n");
                 before_count++;
                 continue;
@@ -2537,7 +3014,8 @@ int main(int argc, char **argv) {
         }
 
         VcfPackedBinningIndexConfiguration index_configuration(bin_size);
-        create_binning_index(input_filename, index_filename, index_configuration);
+        // create_binned_index(input_filename, index_filename, index_configuration);
+        create_binned_index2(input_filename, index_filename, index_configuration);
     } else if (action == "query-binned-index") {
         if (argc < 4) {
             printf("Usage: ./main query-binned-index <compressed-filename> <region>");

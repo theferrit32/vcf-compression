@@ -164,6 +164,16 @@ uint64_t str_to_uint64(const std::string& s, bool& success) {
     return val;
 }
 
+int str_to_long(const std::string& s, long *out) {
+    char *endptr = NULL;
+    long val = std::strtoul(s.c_str(), &endptr, 10);
+    if (endptr != (s.c_str() + s.size())) {
+        return -1;
+    }
+    *out = val;
+    return 0;
+}
+
 // Return value must be deleted by caller
 void uint64_to_uint8_array(uint64_t val, uint8_t bytes[8]) {
     //uint8_t *bytes = new uint8_t[8];
