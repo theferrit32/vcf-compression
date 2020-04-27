@@ -5,6 +5,7 @@ import copy
 import subprocess
 import numpy as np
 import humanize
+import argparse
 
 from evaluation.plt_common import plt
 from evaluation.plt_common import colors
@@ -29,26 +30,38 @@ tabix_cmd = '/home/krferrit/vcf-compression/tabix'
 bgzip_cmd = '/home/krferrit/vcf-compression/bgzip'
 
 default_binsize = 150
-test_runs = 10
+test_runs = 5
 
 # Chromosome 22
-vcfc_filename = '/mnt/ext4/ALL.chr22.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.vcfc'
-sparse_filename = vcfc_filename + '.sparse'
-bgzip_filename = '/mnt/ext4/ALL.chr22.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz'
-bcf_filename = '/mnt/ext4/ALL.chr22.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.bcf'
-reference_name = '22'
-min_pos = 16050075
-max_pos = 51244237
+def setup_chr22(data_dir='/mnt/ext4'):
+    global vcfc_filename, sparse_filename, bgzip_filename, bcf_filename, reference_name, min_pos, max_pos
+    vcfc_filename = os.path.join(data_dir, 'ALL.chr22.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.vcfc')
+    sparse_filename = vcfc_filename + '.sparse'
+    bgzip_filename = os.path.join(data_dir, 'ALL.chr22.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz')
+    bcf_filename = os.path.join(data_dir, 'ALL.chr22.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.bcf')
+    reference_name = '22'
+    min_pos = 16050075
+    max_pos = 51244237
 
 # Chromosome 1
-# file_directory = '/mnt/ext4'
-# vcfc_filename = file_directory + '/ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.vcfc'
-# sparse_filename = vcfc_filename + '.sparse'
-# bgzip_filename = file_directory + '/ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz'
-# bcf_filename = file_directory + '/ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.bcf'
-# reference_name = '1'
-# min_pos = 10177
-# max_pos = 249240543
+def setup_chr1(data_dir='/mnt/ext4'):
+    global vcfc_filename, sparse_filename, bgzip_filename, bcf_filename, reference_name, min_pos, max_pos
+    vcfc_filename = os.path.join(data_dir, 'ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.vcfc')
+    sparse_filename = vcfc_filename + '.sparse'
+    bgzip_filename = os.path.join(data_dir, 'ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz')
+    bcf_filename = os.path.join(data_dir, 'ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.bcf')
+    reference_name = '1'
+    min_pos = 10177
+    max_pos = 249240543
+
+    # file_directory = '/mnt/ext4'
+    # vcfc_filename = file_directory + '/ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.vcfc'
+    # sparse_filename = vcfc_filename + '.sparse'
+    # bgzip_filename = file_directory + '/ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz'
+    # bcf_filename = file_directory + '/ALL.chr1.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.bcf'
+    # reference_name = '1'
+    # min_pos = 10177
+    # max_pos = 249240543
 
 
 
@@ -181,12 +194,13 @@ def measure_binned_index_creation_time():
 
 
 def graph_binned_index_creation_time(measurements):
-    measurement = measurements['data']['vcfc_binned_index_creation_time']['data']
-    xvals = [m['bin_size'] for m in measurement]
-    yvals = [m['time'] for m in measurement]
-    errs = [m['stddev'] for m in measurement]
+    measurement = measurements['data']['vcfc_binned_index_creation_time']
+    data = measurement['data']
+    xvals = [m['bin_size'] for m in data]
+    yvals = [m['time'] for m in data]
+    errs = [m['stddev'] for m in data]
 
-    plt.errorbar(xvals, yvals, errs)
+    plt.errorbar(xvals, yvals, errs, label=measurement['label'])
 
     plt.xlabel(measurements['xlabel'])
     plt.ylabel(measurements['ylabel'])
@@ -197,11 +211,8 @@ def graph_binned_index_creation_time(measurements):
     plt.margins(0.01)
     plt.tight_layout()
 
-    if 'name' in measurements:
-        filename = measurements['name'] + '.png'
-    else:
-        filename = measurements['title'].replace(' ', '_') + '.png'
-    plt.savefig(filename, dpi=200)
+    filename = measurements['name'] + '.png'
+    plt.savefig(filename)
     print('Saved figure: %s' % filename)
 
 
@@ -214,7 +225,7 @@ def graph_measurements_single(measurements):
 def graph_measurements_range(measurements):
     return graph_measurements(
         measurements,
-        lambda val: val['end_position']-val['start_position'],
+        lambda val: val['start_position'],
         lambda val: val['time'])
 
 def graph_measurements(measurements, xfunc, yfunc, stddev_label=False):
@@ -257,7 +268,7 @@ def graph_measurements(measurements, xfunc, yfunc, stddev_label=False):
     plt.xlabel(measurements['xlabel'])
     plt.ylabel(measurements['ylabel'])
     # plt.xticks(rotation=90)
-    plt.ylim(bottom=0, top=max_yval)
+    plt.ylim(bottom=0, top=max_yval*1.1)
     plt.legend()
     plt.title(measurements['title'])
 
@@ -300,13 +311,14 @@ def _run_variant_query_exhaustive(
         })
     return total_durations
 
-def measure_all_range_variant(queries:int=200, query_range:int=10000):
+def measure_all_range_variant(queries:int=200, query_range:int=5000):
     data = {}
     config = Config(tabix_cmd, vcfc_dir, bgzip_cmd)
     # step = int((max_pos - min_pos) / queries)
 
     # Set step to fit `queries` number of positions into the range(min_pos, max_pos)
     step = int((max_pos - query_range - min_pos) / queries)
+    print('Step: %s' % step)
     config = Config(tabix_cmd, vcfc_dir, bgzip_cmd)
 
     print('Creating binned index for binned index queries')
@@ -354,7 +366,7 @@ def measure_all_range_variant(queries:int=200, query_range:int=10000):
         run_vcfc_binned_index_query,
         vcfc_filename
     )
-    data['vcfc_sparse_external_exhaustive'] = {
+    data['vcfc_binned_external_exhaustive'] = {
         'data': binned_durations,
         'label': 'VCFC Binned External Index (Bin Size %d)' % default_binsize
     }
@@ -442,7 +454,7 @@ def measure_all_single_variant(queries:int=200):
         run_vcfc_binned_index_query,
         vcfc_filename
     )
-    data['vcfc_sparse_external_exhaustive'] = {
+    data['vcfc_binned_external_exhaustive'] = {
         'data': binned_durations,
         'label': 'VCFC Binned External Index (Bin Size %d)' % default_binsize
     }
@@ -482,16 +494,22 @@ def measure_all_single_variant(queries:int=200):
     }
 
 
-def measure_binned_index_time_profile(queries:int=100):
+def measure_binned_index_time_profile(queries:int=500):
     data = {}
     step = int((max_pos - min_pos) / queries)
     config = Config(tabix_cmd, vcfc_dir, bgzip_cmd)
 
+    # Override test runs for this, since high # queries per test amortizes runtime
+    test_runs = 2
+
     bin_sizes = [
         *range(5, 50, 5),
         *range(50, 200, 10),
-        *range(200, 2000+1, 50)
+        *range(200, 1000+1, 50)
     ]
+
+    # Load file into host cache
+    os.system('cat %s > /dev/null' % vcfc_filename)
 
     for bin_size in bin_sizes:
         bin_profile = {}
@@ -499,26 +517,42 @@ def measure_binned_index_time_profile(queries:int=100):
         bin_index_creation_time = create_binned_index(config, vcfc_filename, bin_size)
         print('Finished creating binned index, took %f seconds' % (bin_index_creation_time))
 
+        # Load index into host cache
+        os.system('cat %s > /dev/null' % (os.path.join(vcfc_filename, '.vcfci')))
+
         # Run regular queries, aggregate profile after each
         print('Running exhaustive binned queries')
         test_count = 0
         for pos in range(min_pos, max_pos+1, step):
             test_count += 1
-            print('vcfc_binned_exhaustive: %d' % pos)
+            print('vcfc_binned_timing_profile: %d' % pos)
 
             profiles = []
             for _ in range(test_runs):
                 profiles.append(run_vcfc_binned_index_timing_profile(config, vcfc_filename, reference_name, pos, pos))
 
             # Merge timing profiles
-            for k in profiles[0]:
-                if k not in bin_profile:
-                    bin_profile[k] = 0
-                for p in profiles:
-                    bin_profile[k] += p[k] / test_count
+            # for k in profiles[0]:
+            #     if k not in bin_profile:
+            #         bin_profile[k] = 0
+            #     for p in profiles:
+            #         bin_profile[k] += p[k] / test_runs
+
+            # Merge timing profiles
+            time_labels = set()
+            for p in profiles:
+                for k in p:
+                    time_labels.add(k)
+
+            for label in time_labels:
+                if label not in bin_profile:
+                    bin_profile[label] = 0
+                label_values = [p[label] for p in profiles if label in p]
+                bin_profile[label] += sum(label_values) / len(label_values)
 
         for k in bin_profile:
             bin_profile[k] /= test_count
+
 
         data['vcfc_binned_index_%d' % bin_size] = {
             'data': bin_profile,
@@ -535,17 +569,20 @@ def measure_binned_index_time_profile(queries:int=100):
     }
 
 
-def measure_binned_index_time_profile_range(query_range:int=10000, queries:int=100):
+def measure_binned_index_time_profile_range(query_range:int=5000, queries:int=500):
     data = {}
     assert queries > 0, 'queries > 0'
     # Set step to fit `queries` number of positions into the range(min_pos, max_pos)
     step = int((max_pos - query_range - min_pos) / queries)
     config = Config(tabix_cmd, vcfc_dir, bgzip_cmd)
 
+    # Override test runs for this, since high # queries per test amortizes runtime
+    test_runs = 2
+
     bin_sizes = [
         *range(5, 50, 5),
         *range(50, 200, 10),
-        *range(200, 2000+1, 50)
+        *range(200, 1000+1, 50)
     ]
 
     for bin_size in bin_sizes:
@@ -560,23 +597,34 @@ def measure_binned_index_time_profile_range(query_range:int=10000, queries:int=1
         test_count = 0
         for pos in range(min_pos, (min_pos+step*queries)+1, step):
             test_count += 1
-            print('vcfc_binned_exhaustive: %d' % pos)
             endpos = pos + query_range
+            print('vcfc_binned_timing_profile_range: %d-%d' % (pos, endpos))
             profiles = []
-            for test_run in range(test_runs):
-                print('%d ' % test_run, end='')
+            for _ in range(test_runs):
                 profiles.append(
                     run_vcfc_binned_index_timing_profile(config, vcfc_filename, reference_name, pos, endpos))
 
             # Merge timing profiles
-            for k in profiles[0]:
-                if k not in bin_profile:
-                    bin_profile[k] = 0
-                for p in profiles:
-                    bin_profile[k] += p[k] / test_runs
+            time_labels = set()
+            for p in profiles:
+                for k in p:
+                    time_labels.add(k)
+
+            for label in time_labels:
+                if label not in bin_profile:
+                    bin_profile[label] = 0
+                label_values = [p[label] for p in profiles if label in p]
+                bin_profile[label] += sum(label_values) / len(label_values)
+
+            # for k in profiles[0]:
+            #     if k not in bin_profile:
+            #         bin_profile[k] = 0
+            #     for p in profiles:
+            #         bin_profile[k] += p[k] / test_runs
 
         for k in bin_profile:
             bin_profile[k] /= test_count
+
 
         data['vcfc_binned_index_%d' % bin_size] = {
             'data': bin_profile,
@@ -693,6 +741,21 @@ def graph_binned_index_time_profile(measurements):
 
 
 def main(args):
+    parser = argparse.ArgumentParser(description='')
+    # subparsers = parser.add_subparsers(title='subcommands', dest='subcommand')
+    # # subcommand build
+    # build_parser = subparsers.add_parser('build', help='Build an image')
+    # build_parser.add_argument('image', type=str, choices=['all','base','jupyter', 'cwl-wrapper'])
+
+    # # subcommand run
+    # run_parser = subparsers.add_parser('run', help='Run an image')
+    # run_subparsers = run_parser.add_subparsers(title='run-subcommands', dest='image')
+    # entry_group.add_argument('--cwl', action='store_true',
+    #         help='Enters the cwltool virtualenvironment')
+
+
+
+
     ops = [
         ['all-exhaustive-single', measure_all_single_variant, graph_measurements_single],
         ['all-exhaustive-range', measure_all_range_variant, graph_measurements_range],
@@ -705,33 +768,73 @@ def main(args):
         ['all-indexing-times', measure_indexing_times, graph_indexing_times]
     ]
 
-    def print_usage():
-        print('Usage: range_query.py opname [measure|graph]')
-        print('opnames:\n' + '\n'.join(o[0] for o in ops))
+    parser.add_argument('testname', choices=[o[0] for o in ops])
+    parser.add_argument('command', choices=['measure', 'graph'])
+    parser.add_argument('--filesystem', choices=['ext4', 'xfs'], default='ext4')
+    parser.add_argument('--chromosome', type=int, choices=[1, 2], default=22)
 
-    if len(args) < 2:
-        print_usage()
-        return -1
+    options = parser.parse_args(args)
 
-    if args[0] not in [o[0] for o in ops]:
-        print_usage()
-        raise RuntimeError('Unrecognized subcommand')
+    # def print_usage():
+    #     print('Usage: range_query.py opname [measure|graph]')
+    #     print('opnames:\n' + '\n'.join(o[0] for o in ops))
+    # if len(args) < 2:
+    #     print_usage()
+    #     return -1
+    # if args[0] not in [o[0] for o in ops]:
+    #     print_usage()
+    #     raise RuntimeError('Unrecognized subcommand')
+    # if len(args) == 3:
+    #     fs = args[3]
+    #     print('Filesystem: %s' % fs)
+    #     if fs == 'ext4':
 
-    for op in ops:
-        opname = op[0]
-        measure_func = op[1]
-        graph_func = op[2]
-        if args[0] == opname:
-            filename = opname + '.json'
-            if args[1] == 'measure':
-                data = measure_func()
-                with open(filename, 'w') as f:
-                    json.dump(data, f)
-                print('Wrote file: ' + filename)
-            elif args[1] == 'graph':
-                with open(filename) as f:
-                    data = json.load(f)
-                graph_func(data)
+    if options.filesystem == 'ext4':
+        data_dir = '/mnt/ext4'
+    elif options.filesystem == 'xfs':
+        data_dir = '/mnt/xfs'
+    else:
+        raise RuntimeError('Invalid fs: %s' % options.filesystem)
+
+    if options.chromosome == 1:
+        setup_chr1(data_dir)
+    elif options.chromosome == 22:
+        setup_chr22(data_dir)
+    else:
+        raise RuntimeError('Invalid chr: %s' % options.chromosome)
+
+    filename = options.testname + '.json'
+    testop = [o for o in ops if o[0] == options.testname][0]
+    measure_func = testop[1]
+    graph_func = testop[2]
+
+    if options.command == 'measure':
+        data = measure_func()
+        with open(filename, 'w') as f:
+            json.dump(data, f)
+        print('Wrote file: ' + filename)
+    elif options.command == 'graph':
+        with open(filename) as f:
+            data = json.load(f)
+        graph_func(data)
+    else:
+        raise RuntimeError('Invalid command: ' % options.command)
+
+    # for op in ops:
+    #     opname = op[0]
+    #     measure_func = op[1]
+    #     graph_func = op[2]
+    #     if args[0] == opname:
+    #         filename = opname + '.json'
+    #         if args[1] == 'measure':
+    #             data = measure_func()
+    #             with open(filename, 'w') as f:
+    #                 json.dump(data, f)
+    #             print('Wrote file: ' + filename)
+    #         elif args[1] == 'graph':
+    #             with open(filename) as f:
+    #                 data = json.load(f)
+    #             graph_func(data)
 
 
 if __name__ == '__main__':

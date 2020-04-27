@@ -9,7 +9,11 @@ function run_measure {
     echo "Must pass a test name"
     exit 1
   fi
-  python3 -u ${evaluation_root}/evaluation_main.py "$1" measure | tee "${1}.log"
+  if [[ -z "$2" ]]; then
+    echo "Must pass a filesystem name (ext4|xfs)"
+    exit 1
+  fi
+  python3 -u ${evaluation_root}/evaluation_main.py "$1" measure --filesystem "$2" | tee "${1}.log"
 }
 
 if [[ -z "$1" ]]; then
@@ -17,14 +21,22 @@ if [[ -z "$1" ]]; then
   exit 1
 fi
 
-echo "Running $1"
+if [[ -z "$2" ]]; then
+  echo "Must pass a filesystem name (ext4|xfs)"
+  exit 1
+fi
 
-run_measure "$1"
+testname="$1"
+fs="$2"
 
-# run_measure sparse-exhaustive-range
-# run_measure sparse-exhaustive-single
-# run_measure binned-exhaustive-single
-# run_measure binned-timing-profile
-# run_measure binned-timing-profile-range
+echo "Running $testname"
+
+run_measure "$testname" "$fs"
+
+# run_measure sparse-exhaustive-range "$fs"
+# run_measure sparse-exhaustive-single "$fs"
+# run_measure binned-exhaustive-single "$fs"
+# run_measure binned-timing-profile "$fs"
+# run_measure binned-timing-profile-range "$fs"
 
 echo "Finished run"

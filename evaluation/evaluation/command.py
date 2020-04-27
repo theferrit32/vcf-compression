@@ -14,8 +14,9 @@ def flush_cache():
     if len(stderr) > 0:
         raise RuntimeError(stderr.decode('utf-8'))
 
-def time_cmd(cmd_args) -> float:
-    flush_cache()
+def time_cmd(cmd_args, do_flush_cache=True) -> float:
+    if do_flush_cache:
+        flush_cache()
     print(cmd_args)
     start_time = time.time()
     # TODO see if capturing stderr in PIPE has any measurable impact. Should only
@@ -24,6 +25,8 @@ def time_cmd(cmd_args) -> float:
     proc.wait()
     end_time = time.time()
     duration = round(end_time - start_time, 6)
+    if proc.returncode != 0:
+        raise RuntimeError('cmd: %s failed with status %d' % (cmd_args, proc.returncode))
     return duration
 
 def create_tabix_index(config:Config, filename:str) -> float:
@@ -119,7 +122,7 @@ def run_vcfc_sparse_external_index_query(config:Config, filename:str, ref:str, s
     return time_cmd(cmd_args)
 
 
-def construct_timing_profile(output:list) -> dict:
+def construct_timing_profile(output:list, convert_to_seconds=True) -> dict:
     '''
     Expects `output` to be a byte array, like that returned from Popen.communicate
     '''
@@ -135,6 +138,11 @@ def construct_timing_profile(output:list) -> dict:
             if component not in profile:
                 profile[component] = 0
             profile[component] += nanoseconds
+
+    if convert_to_seconds:
+        for label in profile:
+            profile[label] = profile[label] / 1e9
+
     return profile
 
 
@@ -150,6 +158,11 @@ def run_vcfc_binned_index_timing_profile(config:Config, filename:str, ref:str, s
         filename,
         '%s:%d-%d' % (ref, start, end)
     ]
+
+    # Load file into host cache
+    # os.system('cat %s > /dev/null' % filename)
+
+    # flush_cache()
 
     start_time = time.time()
     proc = subprocess.Popen(cmd_args, stdin=None, stdout=subprocess.PIPE)
