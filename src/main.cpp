@@ -344,7 +344,9 @@ void query_sparse_file_fd(const std::string& input_filename, VcfCoordinateQuery 
         long initial_seek_data = lseek(input_fd, initial_lookup_offset, SEEK_DATA);
         if (initial_seek_data < initial_lookup_offset) {
             perror("lseek");
-            throw std::runtime_error("Failed to call lseek SEEK_DATA from " + std::to_string(initial_lookup_offset));
+            throw std::runtime_error("Failed to call lseek SEEK_DATA from "
+                + std::to_string(initial_lookup_offset)
+                + ", status = " + std::to_string(initial_seek_data));
         }
         debugf("initial_lookup_offset = %ld, initial_seek_data = %ld\n",
             initial_lookup_offset, initial_seek_data);
@@ -761,6 +763,7 @@ bool alt_is_structural(const std::string& alt) {
 long compute_end_position(
         long pos,
         const std::string& reference_name,
+        const std::string& ref,
         const std::string& alt,
         const std::string& info) {
     // long read_to_ret = 0;
@@ -833,8 +836,8 @@ long compute_end_position(
         }
         // POS plus longest region, either insertion or deletion
         // end_position = pos + std::abs((long)(reference_name.size() - max_alt_size));
-        if (reference_name.size() >= max_alt_size) {
-            end_position = pos + reference_name.size();
+        if (ref.size() >= max_alt_size) {
+            end_position = pos + ref.size() - 1;
         } else {
             end_position = pos + max_alt_size - 1;
         }
@@ -940,7 +943,7 @@ void create_sparse_external_index(
                 throw std::runtime_error("Failed to read info");
             }
         }
-        long end_position = compute_end_position(pos, reference_name, alt, info);
+        long end_position = compute_end_position(pos, reference_name, ref, alt, info);
 
         // TODO Write entries for every position between pos and end_pos if one doesn't already exist
         // for (long initial_index_pos = pos; initial_index_pos <= end_position; initial_index_pos++) {
@@ -1278,6 +1281,679 @@ void query_sparse_external_index(
 }
 
 
+void create_binned_index4(
+        const std::string& compressed_input_filename,
+        const std::string& index_filename,
+        VcfPackedBinningIndexConfiguration& index_configuration) {
+    FILE *input_file = fopen(compressed_input_filename.c_str(), "r");
+    if (input_file == NULL) {
+        perror("fopen");
+        throw std::runtime_error("Failed to open file: " + compressed_input_filename);
+    }
+    FILE *output_file = fopen(index_filename.c_str(), "w");
+    if (output_file == NULL) {
+        perror("fopen");
+        throw std::runtime_error("Failed to open output file: " + index_filename);
+    }
+
+    int status;
+    VcfCompressionSchema schema;
+    debugf("Parsing metadata lines and header line\n");
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    decompress2_metadata_headers(input_file, meta_header_lines, schema);
+
+    reference_name_map ref_name_map;
+
+    // std::vector<byte_t> line_bytes;
+    // line_bytes.reserve(16 * 1024);
+
+    // Counter to handle entries per bin
+    size_t line_number = 0;
+
+    // Iterate through lines of compressed file
+    // long total_write_bytes = 0;
+
+    // keep map of binned position -> end_position, index entry
+    // std::map<size_t,std::pair<size_t,struct index_entry>> index_map;
+
+    typedef struct _position {
+        uint8_t reference_name_idx;
+        long start;
+        long end;
+    } position_t;
+
+    // std::vector<std::pair<position_t,struct index_entry>> index_vector;
+    std::vector<struct index_entry> index_vector;
+
+    while (true) {
+        // line_bytes.clear();
+        long line_byte_offset = ftell(input_file);
+
+        debugf("Start of line, stream positioned so next byte is at position %ld (0x%08lx)\n",
+                line_byte_offset,
+                line_byte_offset);
+
+        compressed_line_length_headers line_length_headers;
+        memset(&line_length_headers, 0, sizeof(compressed_line_length_headers));
+        status = read_compressed_line_length_headers(input_file, &line_length_headers);
+        if (status == 0) {
+            debugf("Finished creating index\n");
+            break;
+        } else if (status != (int) compressed_line_length_headers_size) {
+            throw std::runtime_error("Failed to read line length headers");
+        }
+
+        // uint64_t read_bytes = 4 + 4; // length headers
+
+        debugf("After length headers, stream positioned so next byte is at position %ld (0x%08lx)\n",
+                ftell(input_file),
+                ftell(input_file));
+
+        uint8_t line_length_header_bytes[4];
+        uint32_to_uint8_array(line_length_headers.line_length, line_length_header_bytes);
+        uint8_t required_columns_length_header_bytes[4];
+        uint32_to_uint8_array(line_length_headers.required_columns_length, required_columns_length_header_bytes);
+        debugf("Line length: %d\n", line_length_headers.line_length);
+
+        // keep track of some column values as we go across, for offset calculation
+        // bool got_reference_name = false;
+        std::string reference_name;
+        reference_name.reserve(32);
+
+        // bool got_pos = false;
+        std::string pos_str;
+        pos_str.reserve(32);
+        size_t pos = 0;
+        size_t end_position = 0;
+
+        long read_to_ret;
+        read_to_ret = read_to(input_file, '\t', true, reference_name);
+        if (read_to_ret <= 0) {
+            throw std::runtime_error("Failed to read reference name");
+        }
+        debugf("CHR=%s\n", reference_name.c_str());
+        read_to_ret = read_to(input_file, '\t', true, pos_str);
+        if (read_to_ret <= 0) {
+            throw std::runtime_error("Failed to read position");
+        }
+        debugf("POS=%s\n", pos_str.c_str());
+        bool success;
+        pos = str_to_uint64(pos_str, success);
+        if (!success) {
+            throw std::runtime_error("Failed to parse pos: " + pos_str);
+        }
+        std::string id;
+        read_to_ret = read_to(input_file, '\t', true, id);
+        std::string ref;
+        read_to_ret = read_to(input_file, '\t', true, ref);
+        std::string alt;
+        read_to_ret = read_to(input_file, '\t', true, alt);
+
+
+        std::string info;
+        std::string qual;
+        std::string filter;
+        if (read_to(input_file, '\t', true, qual) <= 0) {
+            throw std::runtime_error("Failed to read qual");
+        }
+        if (read_to(input_file, '\t', true, filter) <= 0) {
+            throw std::runtime_error("Failed to read filter");
+        }
+        if (read_to(input_file, '\t', true, info) <= 0) {
+            throw std::runtime_error("Failed to read info");
+        }
+        debugf("CHR=%s\n", reference_name.c_str());
+        debugf("POS=%s\n", pos_str.c_str());
+        debugf("ID=%s\n", id.c_str());
+        debugf("REF=%s\n", ref.c_str());
+        debugf("ALT=%s\n", alt.c_str());
+        debugf("QUAL=%s\n", qual.c_str());
+        debugf("FILTER=%s\n", filter.c_str());
+        debugf("INFO=%s\n", info.c_str());
+
+        end_position = compute_end_position(pos, reference_name, ref, alt, info);
+        debugf("END_POS=%ld\n", end_position);
+
+        // insert index entries for every position between [pos, end_position]
+        // keep map of binned position -> index entry
+
+        // insert or update index entries which exist if this for this positional range [pos, end_position]
+
+        uint8_t reference_name_idx = ref_name_map.reference_to_int(reference_name);
+
+        // position_t line_position;
+        // line_position.reference_name_idx = reference_name_idx;
+        // line_position.start = pos;
+        // line_position.end = end_position;
+
+        struct index_entry new_entry;
+        new_entry.reference_name_idx = reference_name_idx;
+        new_entry.position = end_position; // CHANGED TO END
+        new_entry.byte_offset = line_byte_offset;
+
+
+        if (index_vector.size() > 0) {
+            // Determine if should be added to vector
+            // if (line_number % index_configuration.entries_per_bin == 0) {
+                struct index_entry last_index_entry = index_vector.back();
+                // position_t last_index_position = last_index_added.first;
+                // long last_index_start = last_index_position.start;
+                uint32_t last_index_end = last_index_entry.position;
+
+                // struct index_entry last_index_entry = last_index_added.second;
+
+                bool added_duplicate = false;
+
+                if (line_number % index_configuration.entries_per_bin == 0) {
+                    // if (pos <= last_index_end) {
+                    //     // Add duplicate entry for previous index entry, with current position
+                    //     debugf("Current line is overlapping previous entry, adding new entry\n");
+                    //     // last_index_entry.position = end_position; // CHANGED TO END
+
+                    //     // // last_index_position.end = line_position.end;
+                    //     // // auto dup_index_item = std::pair<position_t,struct index_entry>(last_index_position, last_index_entry);
+
+                    //     // index_vector.push_back(last_index_entry);
+                    //     index_vector.push_back(new_entry);
+                    // } else {
+                    //     debugf("Current line start %u is greater than last index end %ld. Adding entry for current line\n",
+                    //         pos, last_index_end);
+                    //     index_vector.push_back(new_entry);
+
+                    // }
+
+                    if (end_position > last_index_end) {
+                        debugf("Current line end %u is greater than last index end %ld. Adding entry for current line\n",
+                            end_position, last_index_end);
+                        index_vector.push_back(new_entry);
+                    }
+
+
+                } else {
+                    // can only grow into prevous entry
+                    if (end_position > last_index_end) {
+                        debugf("Growing last entry position end from %u to %lu\n",
+                        index_vector[index_vector.size()-1].position, end_position);
+                        index_vector[index_vector.size()-1].position = end_position;
+                    } else {
+                        debugf("Line was within previous index entry bounds, doing nothing\n");
+                    }
+                }
+
+                // if (pos < last_index_end) {
+                //     // Add duplicate entry for previous index entry, with current position
+                //     debugf("Adding duplicate entry\n");
+                //     last_index_entry.position = end_position; // CHANGED TO END
+                //     // last_index_position.end = line_position.end;
+                //     // auto dup_index_item = std::pair<position_t,struct index_entry>(last_index_position, last_index_entry);
+
+                //     index_vector.push_back(last_index_entry);
+                //     added_duplicate = true;
+                // } else if (line_number % index_configuration.entries_per_bin == 0) {
+
+                //     debugf("Adding entry for current line\n");
+                //     // Add new entry for current line
+                //     // auto new_index_item = std::pair<position_t,struct index_entry>(line_position, new_entry);
+
+                //     index_vector.push_back(new_entry);
+                // } else {
+                //     debugf("Growing last entry position end from %u to %lu\n",
+                //         index_vector[index_vector.size()-1].position, end_position);
+                //     index_vector[index_vector.size()-1].position = end_position; // CHANGED to end
+                // }
+
+
+                // if (line_position.end > last_index_end) {
+
+                // }
+
+
+                // if (line_position.start < last_index_end) {
+                //     // Add duplicate entry for previous index entry, with current position
+                //     debugf("Adding duplicate entry\n");
+                //     last_index_entry.position = line_position.end; // CHANGED TO END
+                //     auto dup_index_item = std::pair<position_t,struct index_entry>(last_index_position, last_index_entry);
+                //     index_vector.push_back(dup_index_item);
+                // }
+
+
+                // if (line_position.end > last_index_end) {
+                //     if (line_number % index_configuration.entries_per_bin == 0) {
+
+                //         debugf("Adding entry for current line\n");
+                //         // Add new entry for current line
+                //         auto new_index_item = std::pair<position_t,struct index_entry>(line_position, new_entry);
+                //         index_vector.push_back(new_index_item);
+                //     } else {
+                //         debugf("Growing last entry position end from %u to %lu\n",
+                //             index_vector[index_vector.size()-1].second.position, end_position);
+                //         index_vector[index_vector.size()-1].second.position = end_position; // CHANGED to end
+                //         index_vector[index_vector.size()-1].first.end = end_position;
+                //     }
+                // }
+
+
+            // } else {
+            //     debugf("Not yet met entries_per_bin\n");
+            // }
+
+
+        } else {
+            // add to vector
+            debugf("First index entry\n");
+            // index_vector.push_back(std::pair<position_t,struct index_entry>(line_position, new_entry));
+            index_vector.push_back(new_entry);
+        }
+
+
+
+        // size_t map_max_start_position = 0;
+        // size_t map_max_end_position = 0;
+        // if (index_map.size() != 0) {
+        //     const std::pair<size_t,std::pair<size_t,struct index_entry>> max_index_map_entry = *(index_map.rbegin());
+        //     map_max_start_position = max_index_map_entry.first;
+        //     map_max_end_position = max_index_map_entry.second.first;
+        //     debugf("index current max position = %lu\n", map_max_start_position);
+
+        // }
+
+        // size_t first_index_position_to_write;
+        // if (pos >= map_max_start_position) {
+        //     first_index_position_to_write = pos;
+        // } else {
+        //     first_index_position_to_write = map_max_start_position;
+        // }
+
+        // if (first_index_position_to_write <= end_position) {
+        //     size_t count = (size_t) ((end_position - first_index_position_to_write) / index_configuration.entries_per_bin);
+        //     count += 1; // allow trailing fragment for rounding in above calculation
+        //     size_t last_index_position_to_write = (end_position + count*index_configuration.entries_per_bin);
+        //     debugf("Expecting to write at most %lu entries between %lu and %lu\n",
+        //         count, first_index_position_to_write, last_index_position_to_write);
+
+        //     for (
+        //             size_t index_position = first_index_position_to_write;
+        //             index_position <= last_index_position_to_write;
+        //             index_position += index_configuration.entries_per_bin) {
+        //         struct index_entry new_entry;
+        //         new_entry.reference_name_idx = reference_name_idx;
+        //         new_entry.position = index_position; // starting position for a query
+        //         new_entry.byte_offset = line_byte_offset;
+        //         debugf("Inserting new index ref_idx=%d, entry start=%u, end=%lu, byte_offset=%lu\n",
+        //             new_entry.reference_name_idx, new_entry.position, end_position, new_entry.byte_offset);
+        //         index_map[index_position] = std::pair<size_t,struct index_entry>(end_position, new_entry);
+        //     }
+        // }
+
+
+        // Determine whether to write this entry to the index or whether it is inside the current bin
+        // if (line_number % index_configuration.entries_per_bin == 0) {
+        //     struct index_entry entry;
+        //     // char *endptr;
+        //     entry.reference_name_idx = ref_name_map.reference_to_int(reference_name);
+        //     entry.position = pos;
+        //     entry.byte_offset = line_byte_offset;
+        //     debugf("Writing entry to index %d %d %ld\n",
+        //         entry.reference_name_idx, entry.position, entry.byte_offset);
+
+        //     long index_entry_bytes = write_index_entry(output_file, &entry);
+        //     total_write_bytes += index_entry_bytes;
+        //     debugf("Wrote %ld bytes to index, new size: %ld\n", index_entry_bytes, total_write_bytes);
+        // } else {
+        //     debugf("Not writing entry to index\n");
+        // }
+        line_number++;
+
+        // seek to next line
+        long next_line_distance = line_length_headers.line_length - (ftell(input_file) - line_byte_offset);
+        next_line_distance += 4; // include line_length header bytes itself
+        debugf("Line length is %u, currently have read %ld bytes, seeking ahead %ld more\n",
+            line_length_headers.line_length, ftell(input_file) - line_byte_offset, next_line_distance);
+        off_t fseek_ret = fseek(input_file, next_line_distance, SEEK_CUR);
+        if (fseek_ret != 0) {
+            throw std::runtime_error(string_format(
+                "Failed to seek forward %ld bytes to offset %ld\n",
+                next_line_distance, ftell(input_file) + next_line_distance));
+        }
+    }
+
+    for (size_t i = 0; i < index_vector.size(); i++) {
+        auto item_entry = index_vector[i];
+        auto item_position = item_entry.position;
+        // auto item_entry = item.second;
+        debugf("Writing entry ref = %u, position = %u, offset = %lu\n",
+            item_entry.reference_name_idx, item_entry.position, item_entry.byte_offset);
+        write_index_entry(output_file, &item_entry);
+    }
+
+    // for (auto iter = index_map.begin(); iter != index_map.end(); iter++) {
+    //     struct index_entry entry = iter->second.second;
+    //     write_index_entry(output_file, &entry);
+    // }
+
+    fclose(output_file);
+    fclose(input_file);
+}
+
+void create_binned_index3(
+        const std::string& compressed_input_filename,
+        const std::string& index_filename,
+        VcfPackedBinningIndexConfiguration& index_configuration) {
+    FILE *input_file = fopen(compressed_input_filename.c_str(), "r");
+    if (input_file == NULL) {
+        perror("fopen");
+        throw std::runtime_error("Failed to open file: " + compressed_input_filename);
+    }
+    FILE *output_file = fopen(index_filename.c_str(), "w");
+    if (output_file == NULL) {
+        perror("fopen");
+        throw std::runtime_error("Failed to open output file: " + index_filename);
+    }
+
+    int status;
+    VcfCompressionSchema schema;
+    debugf("Parsing metadata lines and header line\n");
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    decompress2_metadata_headers(input_file, meta_header_lines, schema);
+
+    reference_name_map ref_name_map;
+
+    // std::vector<byte_t> line_bytes;
+    // line_bytes.reserve(16 * 1024);
+
+    // Counter to handle entries per bin
+    size_t line_number = 0;
+
+    // Iterate through lines of compressed file
+    // long total_write_bytes = 0;
+
+    // keep map of binned position -> end_position, index entry
+    // std::map<size_t,std::pair<size_t,struct index_entry>> index_map;
+
+    typedef struct _position {
+        uint8_t reference_name_idx;
+        long start;
+        long end;
+    } position_t;
+
+    std::vector<std::pair<position_t,struct index_entry>> index_vector;
+
+    while (true) {
+        // line_bytes.clear();
+        long line_byte_offset = ftell(input_file);
+
+        debugf("Start of line, stream positioned so next byte is at position %ld (0x%08lx)\n",
+                line_byte_offset,
+                line_byte_offset);
+
+        compressed_line_length_headers line_length_headers;
+        memset(&line_length_headers, 0, sizeof(compressed_line_length_headers));
+        status = read_compressed_line_length_headers(input_file, &line_length_headers);
+        if (status == 0) {
+            debugf("Finished creating index\n");
+            break;
+        } else if (status != (int) compressed_line_length_headers_size) {
+            throw std::runtime_error("Failed to read line length headers");
+        }
+
+        // uint64_t read_bytes = 4 + 4; // length headers
+
+        debugf("After length headers, stream positioned so next byte is at position %ld (0x%08lx)\n",
+                ftell(input_file),
+                ftell(input_file));
+
+        uint8_t line_length_header_bytes[4];
+        uint32_to_uint8_array(line_length_headers.line_length, line_length_header_bytes);
+        uint8_t required_columns_length_header_bytes[4];
+        uint32_to_uint8_array(line_length_headers.required_columns_length, required_columns_length_header_bytes);
+        debugf("Line length: %d\n", line_length_headers.line_length);
+
+        // keep track of some column values as we go across, for offset calculation
+        // bool got_reference_name = false;
+        std::string reference_name;
+        reference_name.reserve(32);
+
+        // bool got_pos = false;
+        std::string pos_str;
+        pos_str.reserve(32);
+        size_t pos = 0;
+        size_t end_position = 0;
+
+        long read_to_ret;
+        read_to_ret = read_to(input_file, '\t', true, reference_name);
+        if (read_to_ret <= 0) {
+            throw std::runtime_error("Failed to read reference name");
+        }
+        debugf("CHR=%s\n", reference_name.c_str());
+        read_to_ret = read_to(input_file, '\t', true, pos_str);
+        if (read_to_ret <= 0) {
+            throw std::runtime_error("Failed to read position");
+        }
+        debugf("POS=%s\n", pos_str.c_str());
+        bool success;
+        pos = str_to_uint64(pos_str, success);
+        if (!success) {
+            throw std::runtime_error("Failed to parse pos: " + pos_str);
+        }
+        std::string id;
+        read_to_ret = read_to(input_file, '\t', true, id);
+        std::string ref;
+        read_to_ret = read_to(input_file, '\t', true, ref);
+        std::string alt;
+        read_to_ret = read_to(input_file, '\t', true, alt);
+
+
+        std::string info;
+        std::string qual;
+        std::string filter;
+        if (read_to(input_file, '\t', true, qual) <= 0) {
+            throw std::runtime_error("Failed to read qual");
+        }
+        if (read_to(input_file, '\t', true, filter) <= 0) {
+            throw std::runtime_error("Failed to read filter");
+        }
+        if (read_to(input_file, '\t', true, info) <= 0) {
+            throw std::runtime_error("Failed to read info");
+        }
+        debugf("CHR=%s\n", reference_name.c_str());
+        debugf("POS=%s\n", pos_str.c_str());
+        debugf("ID=%s\n", id.c_str());
+        debugf("REF=%s\n", ref.c_str());
+        debugf("ALT=%s\n", alt.c_str());
+        debugf("QUAL=%s\n", qual.c_str());
+        debugf("FILTER=%s\n", filter.c_str());
+        debugf("INFO=%s\n", info.c_str());
+
+        end_position = compute_end_position(pos, reference_name, ref, alt, info);
+        debugf("END_POS=%ld\n", end_position);
+
+        // insert index entries for every position between [pos, end_position]
+        // keep map of binned position -> index entry
+
+        // insert or update index entries which exist if this for this positional range [pos, end_position]
+
+        uint8_t reference_name_idx = ref_name_map.reference_to_int(reference_name);
+
+        position_t line_position;
+        line_position.reference_name_idx = reference_name_idx;
+        line_position.start = pos;
+        line_position.end = end_position;
+
+        struct index_entry new_entry;
+        new_entry.reference_name_idx = reference_name_idx;
+        new_entry.position = end_position; // CHANGED TO END
+        new_entry.byte_offset = line_byte_offset;
+
+
+        if (index_vector.size() > 0) {
+            // Determine if should be added to vector
+            // if (line_number % index_configuration.entries_per_bin == 0) {
+                auto last_index_added = index_vector.back();
+                position_t last_index_position = last_index_added.first;
+                // long last_index_start = last_index_position.start;
+                long last_index_end = last_index_position.end;
+
+                struct index_entry last_index_entry = last_index_added.second;
+
+                bool added_duplicate = false;
+
+                if (line_position.start < last_index_end) {
+                    // Add duplicate entry for previous index entry, with current position
+                    debugf("Adding duplicate entry\n");
+                    last_index_entry.position = line_position.end; // CHANGED TO END
+                    last_index_position.end = line_position.end;
+                    auto dup_index_item = std::pair<position_t,struct index_entry>(last_index_position, last_index_entry);
+                    index_vector.push_back(dup_index_item);
+                    added_duplicate = true;
+                }
+
+
+                if (line_position.end > last_index_end) {
+                    if (line_number % index_configuration.entries_per_bin == 0) {
+
+                        debugf("Adding entry for current line\n");
+                        // Add new entry for current line
+                        auto new_index_item = std::pair<position_t,struct index_entry>(line_position, new_entry);
+                        index_vector.push_back(new_index_item);
+                    } else {
+                        debugf("Growing last entry position end from %u to %lu\n",
+                            index_vector[index_vector.size()-1].second.position, end_position);
+                        index_vector[index_vector.size()-1].second.position = end_position; // CHANGED to end
+                        index_vector[index_vector.size()-1].first.end = end_position;
+                    }
+                }
+
+
+                // if (line_position.start < last_index_end) {
+                //     // Add duplicate entry for previous index entry, with current position
+                //     debugf("Adding duplicate entry\n");
+                //     last_index_entry.position = line_position.end; // CHANGED TO END
+                //     auto dup_index_item = std::pair<position_t,struct index_entry>(last_index_position, last_index_entry);
+                //     index_vector.push_back(dup_index_item);
+                // }
+
+
+                // if (line_position.end > last_index_end) {
+                //     if (line_number % index_configuration.entries_per_bin == 0) {
+
+                //         debugf("Adding entry for current line\n");
+                //         // Add new entry for current line
+                //         auto new_index_item = std::pair<position_t,struct index_entry>(line_position, new_entry);
+                //         index_vector.push_back(new_index_item);
+                //     } else {
+                //         debugf("Growing last entry position end from %u to %lu\n",
+                //             index_vector[index_vector.size()-1].second.position, end_position);
+                //         index_vector[index_vector.size()-1].second.position = end_position; // CHANGED to end
+                //         index_vector[index_vector.size()-1].first.end = end_position;
+                //     }
+                // }
+
+
+            // } else {
+            //     debugf("Not yet met entries_per_bin\n");
+            // }
+
+
+        } else {
+            // add to vector
+            debugf("First index entry\n");
+            index_vector.push_back(std::pair<position_t,struct index_entry>(line_position, new_entry));
+        }
+
+
+
+        // size_t map_max_start_position = 0;
+        // size_t map_max_end_position = 0;
+        // if (index_map.size() != 0) {
+        //     const std::pair<size_t,std::pair<size_t,struct index_entry>> max_index_map_entry = *(index_map.rbegin());
+        //     map_max_start_position = max_index_map_entry.first;
+        //     map_max_end_position = max_index_map_entry.second.first;
+        //     debugf("index current max position = %lu\n", map_max_start_position);
+
+        // }
+
+        // size_t first_index_position_to_write;
+        // if (pos >= map_max_start_position) {
+        //     first_index_position_to_write = pos;
+        // } else {
+        //     first_index_position_to_write = map_max_start_position;
+        // }
+
+        // if (first_index_position_to_write <= end_position) {
+        //     size_t count = (size_t) ((end_position - first_index_position_to_write) / index_configuration.entries_per_bin);
+        //     count += 1; // allow trailing fragment for rounding in above calculation
+        //     size_t last_index_position_to_write = (end_position + count*index_configuration.entries_per_bin);
+        //     debugf("Expecting to write at most %lu entries between %lu and %lu\n",
+        //         count, first_index_position_to_write, last_index_position_to_write);
+
+        //     for (
+        //             size_t index_position = first_index_position_to_write;
+        //             index_position <= last_index_position_to_write;
+        //             index_position += index_configuration.entries_per_bin) {
+        //         struct index_entry new_entry;
+        //         new_entry.reference_name_idx = reference_name_idx;
+        //         new_entry.position = index_position; // starting position for a query
+        //         new_entry.byte_offset = line_byte_offset;
+        //         debugf("Inserting new index ref_idx=%d, entry start=%u, end=%lu, byte_offset=%lu\n",
+        //             new_entry.reference_name_idx, new_entry.position, end_position, new_entry.byte_offset);
+        //         index_map[index_position] = std::pair<size_t,struct index_entry>(end_position, new_entry);
+        //     }
+        // }
+
+
+        // Determine whether to write this entry to the index or whether it is inside the current bin
+        // if (line_number % index_configuration.entries_per_bin == 0) {
+        //     struct index_entry entry;
+        //     // char *endptr;
+        //     entry.reference_name_idx = ref_name_map.reference_to_int(reference_name);
+        //     entry.position = pos;
+        //     entry.byte_offset = line_byte_offset;
+        //     debugf("Writing entry to index %d %d %ld\n",
+        //         entry.reference_name_idx, entry.position, entry.byte_offset);
+
+        //     long index_entry_bytes = write_index_entry(output_file, &entry);
+        //     total_write_bytes += index_entry_bytes;
+        //     debugf("Wrote %ld bytes to index, new size: %ld\n", index_entry_bytes, total_write_bytes);
+        // } else {
+        //     debugf("Not writing entry to index\n");
+        // }
+        line_number++;
+
+        // seek to next line
+        long next_line_distance = line_length_headers.line_length - (ftell(input_file) - line_byte_offset);
+        next_line_distance += 4; // include line_length header bytes itself
+        debugf("Line length is %u, currently have read %ld bytes, seeking ahead %ld more\n",
+            line_length_headers.line_length, ftell(input_file) - line_byte_offset, next_line_distance);
+        off_t fseek_ret = fseek(input_file, next_line_distance, SEEK_CUR);
+        if (fseek_ret != 0) {
+            throw std::runtime_error(string_format(
+                "Failed to seek forward %ld bytes to offset %ld\n",
+                next_line_distance, ftell(input_file) + next_line_distance));
+        }
+    }
+
+    for (size_t i = 0; i < index_vector.size(); i++) {
+        auto item = index_vector[i];
+        auto item_position = item.first;
+        auto item_entry = item.second;
+        debugf("Writing entry ref = %u, position = %u, offset = %lu for variant with position %u:%ld-%ld\n",
+            item_entry.reference_name_idx, item_entry.position, item_entry.byte_offset,
+            item_position.reference_name_idx, item_position.start, item_position.end);
+        write_index_entry(output_file, &item_entry);
+    }
+
+    // for (auto iter = index_map.begin(); iter != index_map.end(); iter++) {
+    //     struct index_entry entry = iter->second.second;
+    //     write_index_entry(output_file, &entry);
+    // }
+
+    fclose(output_file);
+    fclose(input_file);
+}
+
+
 void create_binned_index2(
         const std::string& compressed_input_filename,
         const std::string& index_filename,
@@ -1314,6 +1990,11 @@ void create_binned_index2(
     // keep map of binned position -> end_position, index entry
     std::map<size_t,std::pair<size_t,struct index_entry>> index_map;
 
+    // typedef struct _position {
+    //     uint8_t reference_name_idx;
+    //     long start;
+    //     long end;
+    // } position_t;
 
     while (true) {
         line_bytes.clear();
@@ -1401,7 +2082,7 @@ void create_binned_index2(
         debugf("FILTER=%s\n", filter.c_str());
         debugf("INFO=%s\n", info.c_str());
 
-        end_position = compute_end_position(pos, reference_name, alt, info);
+        end_position = compute_end_position(pos, reference_name, ref, alt, info);
         debugf("END_POS=%ld\n", end_position);
 
         // insert index entries for every position between [pos, end_position]
@@ -1902,7 +2583,7 @@ int read_reference_name_and_pos(int input_fd, std::string *reference_name_out, u
 }
 
 
-void query_binned_index_binarysearch(const std::string& compressed_filename, VcfCoordinateQuery query) {
+void query_binned_index_binarysearch_inmemory(const std::string& compressed_filename, VcfCoordinateQuery query) {
     int status = 0;
 
     #ifdef TIMING
@@ -1951,6 +2632,29 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
     long entry_count = index_size / struct_index_entry_size;
     debugf("Index of size %ld has %ld entries\n", index_size, entry_count);
 
+    if (entry_count == 0) {
+        fclose(compressed_file);
+        fclose(index_file);
+        return;
+    }
+
+    // Load entire index into memory
+    struct index_entry *index = (struct index_entry *) calloc(entry_count, struct_index_entry_size);
+    if (fread(index, struct_index_entry_size, entry_count, index_file) < (size_t) entry_count) {
+        throw std::runtime_error("Failed to load all index file entries");
+    }
+
+    auto load_index_entry = [index, entry_count](long entry_number, struct index_entry *entry) -> int {
+        if (entry_number >= entry_count) {
+            return -1;
+        }
+        const struct index_entry ient = *(struct index_entry*)(((void*)index) + entry_number*struct_index_entry_size);
+        entry->reference_name_idx = ient.reference_name_idx;
+        entry->position = ient.position;
+        entry->byte_offset = ient.byte_offset;
+        return 0;
+    };
+
     // Find bin before the first bin start that matches the query
     // long start_entry_address = 0;
 
@@ -1970,6 +2674,7 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
     long search_end = entry_count - 1;
     long search_mid = get_mid(search_start, search_end);
     struct index_entry entry;
+    memset(&entry, 0, sizeof(struct index_entry));
 
     // int bytes_read;
     #ifdef TIMING
@@ -2002,23 +2707,27 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
         }
 
         search_mid = get_mid(search_start, search_end);
-        long mid_offset = search_mid * struct_index_entry_size;
-        debugf("Search mid_index = %ld, mid_offset = %ld\n", search_mid, mid_offset);
+        // long mid_offset = search_mid * struct_index_entry_size;
+        debugf("Search mid_index = %ld\n", search_mid);
 
-        status = fseek(index_file, mid_offset, SEEK_SET);
-        if (status != 0) {
-            debugf("Failed to seek to mid index\n");
-            fclose(compressed_file);
-            fclose(index_file);
-            return;
-        }
+        // status = fseek(index_file, mid_offset, SEEK_SET);
+        // if (status != 0) {
+        //     debugf("Failed to seek to mid index\n");
+        //     fclose(compressed_file);
+        //     fclose(index_file);
+        //     return;
+        // }
 
-        int bytes_read = 0;
-        if (read_index_entry(index_file, &entry, &bytes_read) != 0) {
-            debugf("Failed to read index entry from index file");
-            fclose(compressed_file);
-            fclose(index_file);
-            return;
+        // int bytes_read = 0;
+        // if (read_index_entry(index_file, &entry, &bytes_read) != 0) {
+        //     debugf("Failed to read index entry from index file");
+        //     fclose(compressed_file);
+        //     fclose(index_file);
+        //     return;
+        // }
+
+        if (load_index_entry(search_mid, &entry) < 0) {
+            throw std::runtime_error("Failed to obtain mid entry");
         }
 
 
@@ -2073,13 +2782,16 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
         long mid_offset = search_mid * struct_index_entry_size;
         debugf("Search mid_index = %ld, mid_offset = %ld\n", search_mid, mid_offset);
 
-        fseek(index_file, mid_offset, SEEK_SET);
-        int bytes_read;
-        if (read_index_entry(index_file, &entry, &bytes_read) != 0) {
-            debugf("Failed to read index entry from index file");
-            fclose(compressed_file);
-            fclose(index_file);
-            return;
+        // fseek(index_file, mid_offset, SEEK_SET);
+        // int bytes_read;
+        // if (read_index_entry(index_file, &entry, &bytes_read) != 0) {
+        //     debugf("Failed to read index entry from index file");
+        //     fclose(compressed_file);
+        //     fclose(index_file);
+        //     return;
+        // }
+        if (load_index_entry(search_mid, &entry) < 0) {
+            throw std::runtime_error("Failed to load index entry");
         }
     }
 
@@ -2176,7 +2888,7 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
                     throw std::runtime_error("Failed to read info");
                 }
             }
-            long end_position = compute_end_position((long)pos, reference_name, alt, info);
+            long end_position = compute_end_position((long)pos, reference_name, ref, alt, info);
 
 
             debugf("Checking reference_name = %s, pos = %lu against query reference_name = %s, start = %lu, end = %lu\n",
@@ -2248,6 +2960,383 @@ void query_binned_index_binarysearch(const std::string& compressed_filename, Vcf
     end = std::chrono::steady_clock::now();
     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
     if (printed_count == 0 && current_state == query_state::BEFORE_QUERY) {
+        // No lines were printed, and didn't reach end of query interval
+        printf("TIMING decompress_seeking: %lu\n", duration.count());
+    } else {
+        printf("TIMING decompress_iteration: %lu\n", duration.count());
+    }
+    #endif
+
+    fclose(index_file);
+    fclose(compressed_file);
+}
+
+void query_binned_index_binarysearch(const std::string& compressed_filename, VcfCoordinateQuery query) {
+    int status = 0;
+
+    #ifdef TIMING
+    std::chrono::time_point<std::chrono::steady_clock> start;
+    std::chrono::time_point<std::chrono::steady_clock> end;
+    std::chrono::nanoseconds duration;
+    #endif
+
+    std::string index_filename = compressed_filename + VCFC_BINNING_INDEX_EXTENSION;
+    debugf("Opening %s\n", compressed_filename.c_str());
+    FILE *compressed_file = fopen(compressed_filename.c_str(), "r");
+    if (compressed_file == NULL) {
+        perror("fopen");
+        debugf("Failed to open input file: %s\n", compressed_filename.c_str());
+        return;
+    }
+    debugf("Opening %s\n", index_filename.c_str());
+    FILE *index_file = fopen(index_filename.c_str(), "r");
+    if (index_file == NULL) {
+        perror("fopen");
+        debugf("Failed to open index file: %s\n", index_filename.c_str());
+        return;
+    }
+
+    debugf("Parsing metadata lines and header line\n");
+    VcfCompressionSchema schema;
+    std::vector<std::string> meta_header_lines;
+    meta_header_lines.reserve(256);
+    decompress2_metadata_headers(compressed_file, meta_header_lines, schema);
+
+    // struct index_entry start_entry;
+    // memset(&start_entry, 0, sizeof(start_entry));
+
+    reference_name_map ref_name_map;
+    uint8_t query_reference_name_idx = ref_name_map.reference_to_int(query.get_reference_name());
+
+    #ifdef TIMING
+    start = std::chrono::steady_clock::now();
+    #endif
+
+    // already checked file existence
+    long index_size = file_size(index_filename.c_str());
+
+    if (index_size % struct_index_entry_size != 0) {
+        throw std::runtime_error(string_format(
+            "Index size %ld was not a multiple of entry size: %ld",
+            index_size, struct_index_entry_size));
+    }
+
+    long entry_count = index_size / struct_index_entry_size;
+    debugf("Index of size %ld has %ld entries\n", index_size, entry_count);
+
+    if (entry_count == 0) {
+        fclose(compressed_file);
+        fclose(index_file);
+        return;
+    }
+
+    // Find bin before the first bin start that matches the query
+    // long start_entry_address = 0;
+
+    auto get_mid = [](long start, long end) -> int {
+        debugf("get_mid %ld, %ld\n", start, end);
+        if (start == end) {
+            return start;
+        } else if (start > end) {
+            throw std::runtime_error("start was greater than end");
+        } else {
+            return (int)((start + end) / 2);
+        }
+    };
+
+    // Entry index for binary search range
+    long search_start = 0;
+    long search_end = entry_count - 1;
+    long search_mid = get_mid(search_start, search_end);
+    struct index_entry entry;
+
+    // int bytes_read;
+    while (true) {
+        if (search_start >= search_end) {
+            // base case
+
+            // if entry is greater than query, go back one entry
+            // if (search_mid > 0 &&
+            //         (entry.reference_name_idx > query_reference_name_idx
+            //             || (entry.reference_name_idx == query_reference_name_idx
+            //                 && entry.position >= query.get_start_position()))) {
+            //     search_mid = search_mid - 1;
+            //     long mid_offset = search_mid * struct_index_entry_size;
+            //     debugf("Search mid_index = %ld, mid_offset = %ld\n", search_mid, mid_offset);
+
+            //     fseek(index_file, mid_offset, SEEK_SET);
+
+            //     if (read_index_entry(index_file, &entry, &bytes_read) != 0) {
+            //         debugf("Failed to read index entry from index file");
+            //         fclose(compressed_file);
+            //         fclose(index_file);
+            //         return;
+            //     }
+            // }
+            debugf("search_start (%ld) >= search_end (%ld)\n", search_start, search_end);
+            break;
+        }
+
+        search_mid = get_mid(search_start, search_end);
+        long mid_offset = search_mid * struct_index_entry_size;
+        debugf("Search mid_index = %ld, mid_offset = %ld\n", search_mid, mid_offset);
+
+        status = fseek(index_file, mid_offset, SEEK_SET);
+        if (status != 0) {
+            debugf("Failed to seek to mid index\n");
+            fclose(compressed_file);
+            fclose(index_file);
+            throw std::runtime_error("Failed to seek to mid index");
+        }
+
+        int bytes_read = 0;
+        if (read_index_entry(index_file, &entry, &bytes_read) != 0) {
+            debugf("Failed to read index entry from index file\n");
+            fclose(compressed_file);
+            fclose(index_file);
+            throw std::runtime_error("Failed to read index entry from index file");
+        }
+
+
+        debugf("entry reference_name_idx=%d, position=%u\n",
+            entry.reference_name_idx, entry.position);
+
+        // Read entry, determine if after or before query
+        if (entry.reference_name_idx == query_reference_name_idx
+                && entry.position == query.get_start_position()) {
+            // This bin entry starts exactly at the query start range
+            debugf("Entry is exactly at start of query range\n");
+            break;
+        }
+        // This bin entry is after the query start range, so search before
+        else if (entry.reference_name_idx > query_reference_name_idx
+                || (entry.reference_name_idx == query_reference_name_idx
+                        && entry.position > query.get_start_position())) {
+            debugf("Entry is after the start of the query range\n");
+            if (search_mid == 0) {
+                debugf("Query starts before start of index, use first index entry\n");
+                break;
+            }
+            search_end = search_mid - 1;
+            debugf("Updated search_end to %ld\n", search_end);
+
+            // // get_mid is start-biased, so now search end might be less than search start
+            // if (search_start > search_end) {
+            //     search_end = search_mid;
+            //     break;
+            // }
+
+        } else if (entry.reference_name_idx < query_reference_name_idx
+                || (entry.reference_name_idx == query_reference_name_idx
+                        && entry.position < query.get_start_position())) {
+            debugf("Entry is before the start of the query range\n");
+            search_start = search_mid + 1;
+            debugf("Updated search_start to %ld\n", search_start);
+        } else {
+            throw std::runtime_error(
+                "Unknown state, index wasn't equal, greater, or less");
+        }
+
+    }
+
+    // We may have found the index entry after the one we want
+    // Check this and back up one if necessary
+    if (search_mid > 0) {
+        if (entry.reference_name_idx > query_reference_name_idx
+                || (entry.reference_name_idx == query_reference_name_idx
+                        && entry.position > query.get_start_position())) {
+            debugf("Backing up one entry\n");
+            search_mid = search_mid - 1;
+            long mid_offset = search_mid * struct_index_entry_size;
+            debugf("Search mid_index = %ld, mid_offset = %ld\n", search_mid, mid_offset);
+
+            status = fseek(index_file, mid_offset, SEEK_SET);
+            if (status != 0) {
+                perror("fseek");
+                debugf("Failed to fseek to %ld, status = %d\n", mid_offset, status);
+                throw std::runtime_error("Failed to fseek");
+            }
+            int bytes_read;
+            if (read_index_entry(index_file, &entry, &bytes_read) != 0) {
+                debugf("Failed to read index entry from index file");
+                fclose(compressed_file);
+                fclose(index_file);
+                throw std::runtime_error("Failed to read index entry");
+            }
+        }
+    }
+
+    debugf("Got bin index %ld, reference = %d, pos = %d\n",
+        search_mid, entry.reference_name_idx, entry.position);
+
+
+
+    #ifdef TIMING
+    end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("TIMING index_search: %lu\n", duration.count());
+    #endif
+
+    std::string linebuf;
+    linebuf.reserve(4 * 4096);
+
+    #ifdef TIMING
+    // start = std::chrono::steady_clock::now();
+    std::chrono::time_point<std::chrono::steady_clock> seek_start;
+    std::chrono::time_point<std::chrono::steady_clock> seek_end;
+    std::chrono::time_point<std::chrono::steady_clock> decompress_start;
+    std::chrono::time_point<std::chrono::steady_clock> decompress_end;
+    // std::chrono::nanoseconds duration;
+
+    seek_start = std::chrono::steady_clock::now();
+    enum query_state {
+        BEFORE_QUERY, IN_QUERY, AFTER_QUERY
+    };
+    enum query_state current_state = query_state::BEFORE_QUERY;
+    #endif
+
+    // Record the number of lines scanned before hitting the desired range
+    int before_count = 0;
+    int printed_count = 0;
+
+    if (entry_count > 0) { // unnecessary check, would have failed earlier
+        debugf("entry reference_name_idx = %u, position = %u, byte_offset = %lu\n",
+            entry.reference_name_idx, entry.position, entry.byte_offset);
+
+        // Iterate through data file from entry.byte_offset
+        fseek(compressed_file, entry.byte_offset, SEEK_SET);
+        // struct compressed_line_length_headers length_headers;
+
+
+        while (true) {
+            linebuf.clear();
+            size_t compressed_line_length;
+            long line_byte_offset = ftell(compressed_file);
+
+            compressed_line_length_headers line_length_headers;
+            memset(&line_length_headers, 0, sizeof(compressed_line_length_headers));
+            status = read_compressed_line_length_headers(compressed_file, &line_length_headers);
+            if (status == 0) {
+                debugf("Finished creating index\n");
+                break;
+            } else if (status != (int) compressed_line_length_headers_size) {
+                throw std::runtime_error("Failed to read line length headers");
+            }
+            // uint64_t read_bytes = 4 + 4; // length headers
+
+            debugf("After length headers, stream positioned so next byte is at position %ld (0x%08lx)\n",
+                    ftell(compressed_file),
+                    ftell(compressed_file));
+
+            // uint8_t line_length_header_bytes[4];
+            // uint32_to_uint8_array(line_length_headers.line_length, line_length_header_bytes);
+            // uint8_t required_columns_length_header_bytes[4];
+            // uint32_to_uint8_array(line_length_headers.required_columns_length, required_columns_length_header_bytes);
+
+            bool success = false;
+            std::string reference_name, pos_str, id, ref, alt, qual, filter, info;
+            if (read_to(compressed_file, '\t', true, reference_name) <= 0) {
+                throw std::runtime_error("Failed to read reference_name");
+            }
+            if (read_to(compressed_file, '\t', true, pos_str) <= 0) {
+                throw std::runtime_error("Failed to read pos");
+            }
+            uint64_t pos = str_to_uint64(pos_str, success);
+            if (!success) {
+                throw std::runtime_error("Failed to parse pos: " + pos_str);
+            }
+            if (read_to(compressed_file, '\t', true, id) <= 0) {
+                throw std::runtime_error("Failed to read id");
+            }
+            if (read_to(compressed_file, '\t', true, ref) <= 0) {
+                throw std::runtime_error("Failed to read ref");
+            }
+            if (read_to(compressed_file, '\t', true, alt) <= 0) {
+                throw std::runtime_error("Failed to read alt");
+            }
+            if (alt_is_structural(alt)) {
+                if (read_to(compressed_file, '\t', true, qual) <= 0) {
+                    throw std::runtime_error("Failed to read qual");
+                }
+                if (read_to(compressed_file, '\t', true, filter) <= 0) {
+                    throw std::runtime_error("Failed to read filter");
+                }
+                if (read_to(compressed_file, '\t', true, info) <= 0) {
+                    throw std::runtime_error("Failed to read info");
+                }
+            }
+            long end_position = compute_end_position((long)pos, reference_name, ref, alt, info);
+
+
+            debugf("Checking reference_name = %s, pos = %lu against query reference_name = %s, start = %lu, end = %lu\n",
+                reference_name.c_str(), pos, query.get_reference_name().c_str(), query.get_start_position(), query.get_end_position());
+
+            int query_compare_to_line = query.compare_to_range(reference_name, pos, end_position);
+
+            if (query_compare_to_line == 0 ) {
+                // If previous state was before, now not before, output decompress_seeking timer
+                #ifdef TIMING
+                if (current_state == query_state::BEFORE_QUERY) {
+                    seek_end = std::chrono::steady_clock::now();
+                    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(seek_end - seek_start);
+                    printf("TIMING decompress_seeking: %lu\n", duration.count());
+                    decompress_start = std::chrono::steady_clock::now();
+                }
+                current_state = query_state::IN_QUERY;
+                #endif
+
+                debugf("Query matched line, outputting\n");
+                status = fseek(compressed_file, line_byte_offset, SEEK_SET);
+                if (status != 0) {
+                    throw std::runtime_error("Failed to return to start of line");
+                }
+
+                status = decompress2_data_line(compressed_file, schema, linebuf, &compressed_line_length);
+                if (status < 0) {
+                    throw std::runtime_error("Failed to decompress line");
+                }
+                printf(linebuf.c_str());
+                printed_count++;
+            } else if (query_compare_to_line < 0) { // line is after query
+                #ifdef TIMING
+                // If previous state was before, now not before, output decompress_seeking timer
+                if (current_state == query_state::BEFORE_QUERY) {
+                    seek_end = std::chrono::steady_clock::now();
+                    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(seek_end - seek_start);
+                    printf("TIMING decompress_seeking: %lu\n", duration.count());
+                    decompress_start = std::chrono::steady_clock::now();
+                }
+
+                current_state = query_state::AFTER_QUERY;
+                #endif
+
+                debugf("Query did not match, state is now AFTER_QUERY\n");
+                break; // End line iteration
+            } else if (query_compare_to_line > 0) { // line is before query
+                debugf("Query did not match, state is still BEFORE_QUERY\n");
+                before_count++;
+                // continue; // fall through
+            }
+
+            long bytes_read_in_line = ftell(compressed_file) - line_byte_offset;
+            long distance_to_next = line_length_headers.line_length + 4 - bytes_read_in_line;
+            status = fseek(compressed_file, distance_to_next, SEEK_CUR);
+            if (status != 0) {
+                perror("fseek");
+                throw std::runtime_error("Failed to seek to next line");
+            }
+
+        }
+        debugf("lines decompressed before query = %d\n", before_count);
+
+    } else {
+        debugf("Index was empty\n");
+    }
+
+    #ifdef TIMING
+    decompress_end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(decompress_end - decompress_start);
+    if (current_state == query_state::BEFORE_QUERY) {
         // No lines were printed, and didn't reach end of query interval
         printf("TIMING decompress_seeking: %lu\n", duration.count());
     } else {
@@ -3022,7 +4111,9 @@ int main(int argc, char **argv) {
 
         VcfPackedBinningIndexConfiguration index_configuration(bin_size);
         // create_binned_index(input_filename, index_filename, index_configuration);
-        create_binned_index2(input_filename, index_filename, index_configuration);
+        // create_binned_index2(input_filename, index_filename, index_configuration);
+        create_binned_index4(input_filename, index_filename, index_configuration);
+
     } else if (action == "query-binned-index") {
         if (argc < 4) {
             printf("Usage: ./main query-binned-index <compressed-filename> <region>");

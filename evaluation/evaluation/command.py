@@ -1,6 +1,9 @@
 import time, os
 import subprocess
 import re
+import io
+import tempfile
+
 from evaluation.config import Config
 
 #cmd = './main_release sparse-query /mnt/ext4/ALL.chr22.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.100k.vcf.vcfc.sparse 22 16050075 19757157'
@@ -11,22 +14,29 @@ def flush_cache():
     cmd_args = ['sudo', '/usr/local/sbin/flush-cache']
     proc = subprocess.Popen(cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = proc.communicate()
-    if len(stderr) > 0:
+    if proc.returncode != 0 or len(stderr) > 0:
         raise RuntimeError(stderr.decode('utf-8'))
 
-def time_cmd(cmd_args, do_flush_cache=True) -> float:
+def time_cmd(cmd_args, do_flush_cache=True, shell=False) -> float:
     if do_flush_cache:
         flush_cache()
     print(cmd_args)
+
     start_time = time.time()
     # TODO see if capturing stderr in PIPE has any measurable impact. Should only
     # store content on error, in which case we don't care as much about accurate time anyways.
-    proc = subprocess.Popen(cmd_args, stdin=None, stdout=subprocess.DEVNULL)
-    proc.wait()
+    proc = subprocess.Popen(
+        cmd_args,
+        shell=shell,
+        stdin=None,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE)
+    # proc.wait()
+    _, stderr = proc.communicate()
     end_time = time.time()
     duration = round(end_time - start_time, 6)
-    if proc.returncode != 0:
-        raise RuntimeError('cmd: %s failed with status %d' % (cmd_args, proc.returncode))
+    if proc.returncode != 0 or len(stderr) > 0:
+        raise RuntimeError('cmd: %s failed with status %d:\n%s' % (cmd_args, proc.returncode, stderr))
     return duration
 
 def create_tabix_index(config:Config, filename:str) -> float:
@@ -51,13 +61,13 @@ def run_tabix(config:Config, filename:str, ref:str, start:int, end:int) -> float
     return time_cmd(cmd_args)
 
 
-def create_vcfc_sparse_file(config:Config, filename:str) -> float:
-    if not os.path.exists(filename):
-        raise RuntimeError('%s does not exist' % filename)
-    cmd_args = [
-        config.get_vcfc_release_cmd(),
+# def create_vcfc_sparse_file(config:Config, filename:str) -> float:
+#     if not os.path.exists(filename):
+#         raise RuntimeError('%s does not exist' % filename)
+#     cmd_args = [
+#         config.get_vcfc_release_cmd(),
 
-    ]
+#     ]
 
 
 def run_vcfc_sparse_query(config:Config, filename:str, ref:str, start:int, end:int) -> float:
@@ -124,10 +134,12 @@ def run_vcfc_sparse_external_index_query(config:Config, filename:str, ref:str, s
 
 def construct_timing_profile(output:list, convert_to_seconds=True) -> dict:
     '''
-    Expects `output` to be a byte array, like that returned from Popen.communicate
-    '''
+    Expects `output` to be a byte array, like that returned from Popen.communicate.
 
-    output = output.decode('utf-8')
+    The vcfc program outputs times in nanoseconds, if convert_to_seconds, converts these to seconds.
+    '''
+    if not isinstance(output, str):
+        output = output.decode('utf-8')
     profile = {}
     pattern = re.compile(r'TIMING (\w+): (\d+)')
     for line in output.split('\n'):
@@ -164,12 +176,39 @@ def run_vcfc_binned_index_timing_profile(config:Config, filename:str, ref:str, s
 
     # flush_cache()
 
+    # I think writing to a file is more reliable than using subprocess.PIPE
+    out_file = tempfile.NamedTemporaryFile(delete=False)
+    err_file = tempfile.NamedTemporaryFile(delete=False)
+
+    # with tempfile.TemporaryFile('w+b') as out_file, tempfile.TemporaryFile('w+b') as err_file:
+
     start_time = time.time()
-    proc = subprocess.Popen(cmd_args, stdin=None, stdout=subprocess.PIPE)
-    # proc.wait() # cannot use this with stdout=subprocess.PIPE
-    stdout, stderr = proc.communicate()
+    proc = subprocess.Popen(cmd_args, stdin=None, stdout=out_file, stderr=err_file)
+    proc.wait() # cannot use this with stdout=subprocess.PIPE
+    # stdout, stderr = proc.communicate()
     end_time = time.time()
     duration = round(end_time - start_time, 6)
+    # print('duration: %.9f' % (duration))
+
+    out_file.close()
+    err_file.close()
+
+    out_file = open(out_file.name, 'r')
+    err_file = open(err_file.name, 'r')
+
+    stdout = out_file.read()#.decode('utf-8')
+    stderr = err_file.read()#.decode('utf-8')
+    # print('stdout: %s' % stdout)
+
+    out_file.close()
+    err_file.close()
+
+    os.unlink(out_file.name)
+    os.unlink(err_file.name)
+
+
+    if proc.returncode != 0 or len(stderr) > 0:
+        raise RuntimeError('cmd: %s failed with status %d:\n%s' % (cmd_args, proc.returncode, stderr))
 
     # print('Constructing profile')
     profile = construct_timing_profile(stdout)
